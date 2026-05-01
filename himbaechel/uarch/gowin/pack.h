@@ -110,6 +110,7 @@ struct GowinPacker
     void pack_latches(void);
     void constrain_lutffs(void);
     void constrain_orphan_lutffs(void);
+    void pair_alu_dffs(void);
     std::unique_ptr<CellInfo> ssram_make_lut(Context *ctx, CellInfo *ci, int index);
 
     // BSRAM

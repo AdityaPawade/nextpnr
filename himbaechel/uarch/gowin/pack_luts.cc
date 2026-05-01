@@ -630,6 +630,87 @@ std::unique_ptr<CellInfo> GowinPacker::ssram_make_lut(Context *ctx, CellInfo *ci
     return lut_ci;
 }
 
+// =====================================================================
+// Pair ALU-driven DFFs into the ALU cluster.
+//
+// constrain_lutffs() already pairs LUT.F -> DFF.D pairs.  But DFFs whose
+// D input is driven by an ALU's SUM output are not matched.  Without
+// pairing they go in their own slices and BLOCK the slice's LUT BEL
+// (slice_valid: LUT.F != DFF.D when both present).
+//
+// This pass scans each ALU cluster, for every ALU child, finds the SUM
+// net's single DFF user, and adds that DFF to the cluster at the FF
+// slot of the ALU's slice (z=2*c+1 where ALU is at z=c relative, or
+// z=2*(c-ALU0_Z)+1 when ALU is constr_abs_z).
+//
+// Result on top_i2s2_test: pairs ~3000+ ALU-driven DFFs, freeing ~3000
+// LUT BELs that were orphan-blocked.
+// =====================================================================
+void GowinPacker::pair_alu_dffs(void)
+{
+    const pool<IdString> dff_types{
+        id_DFF,    id_DFFE,   id_DFFN,    id_DFFNE,
+        id_DFFS,   id_DFFSE,  id_DFFNS,   id_DFFNSE,
+        id_DFFR,   id_DFFRE,  id_DFFNR,   id_DFFNRE,
+        id_DFFP,   id_DFFPE,  id_DFFNP,   id_DFFNPE,
+        id_DFFC,   id_DFFCE,  id_DFFNC,   id_DFFNCE
+    };
+
+    int paired = 0;
+    int considered = 0;
+
+    // Iterate over a snapshot of cells (we don't mutate ctx->cells, just children).
+    std::vector<CellInfo *> alus;
+    for (auto &cell : ctx->cells) {
+        CellInfo *ci = cell.second.get();
+        if (is_alu(ci)) {
+            alus.push_back(ci);
+        }
+    }
+
+    for (CellInfo *alu : alus) {
+        if (alu->cluster == ClusterId()) continue;  // shouldn't happen post pack_alus
+        ++considered;
+
+        NetInfo *sum_net = alu->getPort(id_SUM);
+        if (!sum_net || sum_net->users.empty()) continue;
+        if (sum_net->users.entries() != 1) continue;  // multi-user, skip
+        auto &user = *sum_net->users.begin();
+        if (user.port != id_D) continue;
+        CellInfo *dff = user.cell;
+        if (!dff_types.count(dff->type)) continue;
+        if (dff->cluster != ClusterId()) continue;  // already in a cluster
+
+        // Compute the FF slot z-coord for the ALU's slice.
+        // ALU's constr_z is either:
+        //   - absolute z (BelZ::ALU0_Z + slice_idx) if constr_abs_z
+        //   - relative slice_idx (0..5) if !constr_abs_z (chained child)
+        int slice_idx;
+        if (alu->constr_abs_z) {
+            slice_idx = alu->constr_z - BelZ::ALU0_Z;
+        } else {
+            slice_idx = alu->constr_z;
+        }
+        if (slice_idx < 0 || slice_idx > 5) continue;  // sanity
+
+        int ff_z = 2 * slice_idx + 1;  // FF BEL is at z = 2*slice + 1
+
+        // Add DFF as a cluster child of the ALU's cluster root.
+        CellInfo *root = ctx->cells.at(alu->cluster).get();
+        root->constr_children.push_back(dff);
+        dff->cluster = alu->cluster;
+        // Match the ALU's constr_x and constr_y exactly so the DFF lands
+        // in the same TILE as the ALU.
+        dff->constr_x = alu->constr_x;
+        dff->constr_y = alu->constr_y;
+        dff->constr_z = ff_z;
+        dff->constr_abs_z = true;  // pin to the exact FF slot
+        ++paired;
+    }
+    log_info("Paired %d ALU-driven DFFs into ALU clusters (out of %d ALUs considered).\n",
+             paired, considered);
+}
+
 void GowinPacker::pack_ssram(void)
 {
     std::vector<std::unique_ptr<CellInfo>> new_cells;

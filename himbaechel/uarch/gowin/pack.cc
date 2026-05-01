@@ -608,6 +608,9 @@ void GowinPacker::run(void)
     constrain_lutffs();
     ctx->check();
 
+    pair_alu_dffs();
+    ctx->check();
+
     // constrain_orphan_lutffs();  // disabled: violates slice_valid (FF.D must == LUT.F)
     // ctx->check();
 
