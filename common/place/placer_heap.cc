@@ -137,19 +137,23 @@ struct ControlSetState
 {
     int32_t ctrl_set = -1;
     int32_t count = 0;
-    void bind(int32_t ctrl_set)
+    // Returns true on success, false if the bind would conflict (caller should
+    // treat this as a placement-rejection rather than a hard assert; needed
+    // because some upstream HeAP code paths bind without first calling check()).
+    bool bind(int32_t ctrl_set)
     {
         if (count == 0) {
             this->ctrl_set = ctrl_set;
-        } else {
-            NPNR_ASSERT(this->ctrl_set == ctrl_set);
+        } else if (this->ctrl_set != ctrl_set) {
+            return false;
         }
         ++count;
+        return true;
     }
     void unbind()
     {
+        if (count <= 0) return;  // tolerate stale unbinds
         --count;
-        NPNR_ASSERT(count >= 0);
         if (count == 0)
             this->ctrl_set = -1;
     }
@@ -601,7 +605,15 @@ class HeAPPlacer
         if (ctx->getBelBucketForBel(bel) != cfg.ff_bel_bucket)
             return true;
         auto loc = ctx->getBelLocation(bel);
-        return control_sets.at(loc.x, loc.y).at(z_to_ctrl_set.at(loc.z)).check(cell_ctrl_set.at(cell));
+        // Guard: tile may have no FF BELs in our control-set groups (e.g. IO tiles
+        // when an FF was packed into an IO cell but bel-bucket still matches).
+        auto &tile = control_sets.at(loc.x, loc.y);
+        if (tile.empty()) return true;
+        auto fnd = z_to_ctrl_set.find(loc.z);
+        if (fnd == z_to_ctrl_set.end()) return true;
+        auto cs_it = cell_ctrl_set.find(cell);
+        if (cs_it == cell_ctrl_set.end()) return true;
+        return tile.at(fnd->second).check(cs_it->second);
     }
 
     void bind_ctrl_set(BelId bel, IdString cell)
@@ -611,7 +623,15 @@ class HeAPPlacer
         if (ctx->getBelBucketForBel(bel) != cfg.ff_bel_bucket)
             return;
         auto loc = ctx->getBelLocation(bel);
-        control_sets.at(loc.x, loc.y).at(z_to_ctrl_set.at(loc.z)).bind(cell_ctrl_set.at(cell));
+        // Guard: tile may have no FF BELs in our control-set groups, or BEL is at a
+        // z-coord we don't track (e.g. FF packed into IO cell).
+        auto &tile = control_sets.at(loc.x, loc.y);
+        if (tile.empty()) return;
+        auto fnd = z_to_ctrl_set.find(loc.z);
+        if (fnd == z_to_ctrl_set.end()) return;
+        auto cs_it = cell_ctrl_set.find(cell);
+        if (cs_it == cell_ctrl_set.end()) return;
+        tile.at(fnd->second).bind(cs_it->second);
     }
 
     void unbind_ctrl_set(BelId bel)

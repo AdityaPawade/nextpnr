@@ -1655,6 +1655,60 @@ void GowinImpl::configurePlacerHeap(PlacerHeapCfg &cfg)
     cfg.ioBufTypes.insert(id_GOWIN_GND);
     cfg.ioBufTypes.insert(id_PINCFG);
     cfg.ioBufTypes.insert(id_GSR);
+
+    // Configure control-set-aware FF placement.  Without this HeAP places DFFs
+    // without regard to which slices share CLK/CE/LSR control nets, leading
+    // to massive thrash during legalisation on tight designs (88%% LUT4, 49%%
+    // DFF utilisation triggers control-set congestion at certain tiles).
+    //
+    // GW5A slice control set groups (chipdb FF z-coords):
+    //   Group 0: slices 0,1   (FF z=1, z=3)
+    //   Group 1: slices 2,3   (FF z=5, z=7)
+    //   Group 2: slices 4-7   (FF z=9, z=11, z=13, z=15) when has_DFF67
+    //           else slices 4,5 only (FF z=9, z=11)
+    cfg.ff_bel_bucket = id_DFF;
+    cfg.ff_control_set_groups.clear();
+    cfg.ff_control_set_groups.push_back({1, 3});
+    cfg.ff_control_set_groups.push_back({5, 7});
+    if (gwu.has_DFF67()) {
+        cfg.ff_control_set_groups.push_back({9, 11, 13, 15});
+    } else {
+        cfg.ff_control_set_groups.push_back({9, 11});
+    }
+    // Iter-decay schedule for control-set window radius.  Earlier iters search
+    // wider for matching control sets; later iters narrow as legalisation
+    // converges.  Same shape as the upstream xilinx defaults.
+    cfg.ctrl_set_max_radius = std::vector<int>{18, 15, 12, 9, 6, 3};
+
+    cfg.get_cell_control_set = [](Context *ctx, const CellInfo *ci) {
+        if (!is_dff(ci))
+            return -1;
+        // Build a unique int key from (CLK, CE, LSR, type-flavour).
+        // Two DFFs with identical control nets and compatible types get
+        // the same key; HeAP then groups them into the same control-set
+        // bucket of a tile during legalisation.
+        const NetInfo *clk = ci->getPort(id_CLK);
+        const NetInfo *ce  = ci->getPort(id_CE);
+        const NetInfo *lsr = nullptr;
+        for (IdString p : {id_SET, id_RESET, id_PRESET, id_CLEAR}) {
+            lsr = ci->getPort(p);
+            if (lsr) break;
+        }
+        // Hash the three nets + cell type.  We use net pointer identities;
+        // two FFs sharing the same NetInfo* on each port hash identically.
+        // Type matters because incompatible_ffs() rules also apply.
+        int32_t h = 17;
+        h = h * 1000003 + (clk ? int32_t(clk->udata) : 0);
+        h = h * 1000003 + (ce  ? int32_t(ce->udata)  : 0);
+        h = h * 1000003 + (lsr ? int32_t(lsr->udata) : 0);
+        // Mix in type to keep e.g. DFF and DFFE in different buckets even
+        // when they share clock/ce nets (they cannot share a slice pair).
+        h = h * 31 + int32_t(ci->type.index);
+        // Avoid -1 (which means "no control set"); fold to non-negative.
+        h &= 0x7fffffff;
+        if (h == 0) h = 1;
+        return h;
+    };
 }
 
 void GowinImpl::drawBel(std::vector<GraphicElement> &g, GraphicElement::style_t style, IdString bel_type, Loc loc)
