@@ -392,6 +392,9 @@ po::options_description CommandHandler::getGeneralOptions()
     general.add_options()("placer-heap-iters-budget", po::value<int>(),
                           "total iterations budget for the legalise loop, expressed as a multiplier of cell "
                           "count (int, default: 32; tight designs may need 64+; 0 disables the check)");
+    general.add_options()("placer-heap-fanout-threshold", po::value<int>(),
+                          "skip nets with fanout >= N during HPWL solve, preventing clock/reset/enable "
+                          "trees from over-clustering sinks (int, default: 64; 0 disables)");
 
     general.add_options()("placer-heap-no-ctrl-set", "disable control set awareness in placer heap");
 
@@ -532,6 +535,10 @@ void CommandHandler::setupContext(Context *ctx)
     if (vm.count("placer-heap-iters-budget"))
         ctx->settings[ctx->id("placerHeap/itersBudgetMultiplier")] =
                 std::to_string(std::max(0, vm["placer-heap-iters-budget"].as<int>()));
+
+    if (vm.count("placer-heap-fanout-threshold"))
+        ctx->settings[ctx->id("placerHeap/hpwlFanoutThreshold")] =
+                std::to_string(std::max(0, vm["placer-heap-fanout-threshold"].as<int>()));
 
     if (vm.count("placer-heap-no-ctrl-set"))
         ctx->settings[ctx->id("placerHeap/noCtrlSet")] = true;

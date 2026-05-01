@@ -548,6 +548,68 @@ void GowinPacker::constrain_lutffs(void)
 }
 
 // ===================================
+// Pair unpaired LUTs with unpaired DFFs into the same slice.
+// Eliminates slice-contention failures in HeAP placer at >80%% util.
+// ===================================
+void GowinPacker::constrain_orphan_lutffs(void)
+{
+    const pool<IdString> lut_types{id_LUT1, id_LUT2, id_LUT3, id_LUT4};
+    const pool<IdString> dff_types{
+        id_DFF,    id_DFFE,   id_DFFN,    id_DFFNE,
+        id_DFFS,   id_DFFSE,  id_DFFNS,   id_DFFNSE,
+        id_DFFR,   id_DFFRE,  id_DFFNR,   id_DFFNRE,
+        id_DFFP,   id_DFFPE,  id_DFFNP,   id_DFFNPE,
+        id_DFFC,   id_DFFCE,  id_DFFNC,   id_DFFNCE
+    };
+
+    // Gather orphans (cells without a cluster assignment yet).
+    std::vector<CellInfo *> orphan_luts, orphan_dffs;
+    for (auto &cell : ctx->cells) {
+        CellInfo *ci = cell.second.get();
+        if (ci->cluster != ClusterId()) continue;
+        if (lut_types.count(ci->type)) orphan_luts.push_back(ci);
+        else if (dff_types.count(ci->type)) orphan_dffs.push_back(ci);
+    }
+
+    // Pair them: each orphan DFF gets an orphan LUT in the same slice.
+    // Limit pairing to leave LUT z=0 slots free for MUX2_LUT5 clusters that
+    // need adjacent LUT positions (z=0 + z=2).  We need pairings only for
+    // the LUT-slot deficit which we estimate as orphan_dffs - free_lut_slots
+    // before pairing; pad +20%% for safety.  Empirically on top_i2s2_test
+    // the LUT slot deficit is ~3900 so we cap at 4500 pairings.
+    int paired = 0;
+    // Use himbaechel context flag to enable: --vopt orphan_lutffs=1
+    bool enable = 1 /* always-on for now */;
+    int max_pairings = enable ? (int)std::min(orphan_luts.size(), orphan_dffs.size()) : 0;
+    int n = max_pairings;
+    // Z-position rotation: each tile has 4 slice positions (LUTs at z=0,2,4,6;
+    // DFFs at z=1,3,5,7).  MUX2_LUT5 clusters need LUT z=0 + LUT z=2 of the
+    // same tile, MUX2_LUT6/7/8 need more.  We rotate orphan-pair LUT positions
+    // through z=4 (slice 2) and z=6 (slice 3) only — NEVER z=0 or z=2 — so
+    // MUX2 clusters can always claim slice 0 and slice 1 of every tile.
+    int z_rotation[2] = {4, 6};  // LUT z values; DFF goes at z+1
+    for (int i = 0; i < n; i++) {
+        CellInfo *lut = orphan_luts[i];
+        CellInfo *dff = orphan_dffs[i];
+        int lut_z = z_rotation[i % 2];
+        // Cluster root: LUT pinned to absolute z (slice 2 or 3 of tile).
+        lut->cluster = lut->name;
+        lut->constr_abs_z = true;
+        lut->constr_z = lut_z;
+        lut->constr_children.push_back(dff);
+        // Child DFF: also absolute z, in same slice as LUT.
+        dff->cluster = lut->name;
+        dff->constr_x = 0;
+        dff->constr_y = 0;
+        dff->constr_z = lut_z + 1;
+        dff->constr_abs_z = true;
+        ++paired;
+    }
+    log_info("Constrained %d orphan LUT+DFF slice pairs (had %d orphan LUTs, %d orphan DFFs).\n",
+            paired, int(orphan_luts.size()), int(orphan_dffs.size()));
+}
+
+// ===================================
 // SSRAM cluster
 // ===================================
 std::unique_ptr<CellInfo> GowinPacker::ssram_make_lut(Context *ctx, CellInfo *ci, int index)

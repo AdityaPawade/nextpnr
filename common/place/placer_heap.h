@@ -54,6 +54,10 @@ struct PlacerHeapCfg
     // Set to 0 to disable the budget check entirely (loops indefinitely on truly
     // unplaceable designs).
     int iters_budget_multiplier = 32;
+    // Skip nets with fanout >= this threshold during HPWL solve.
+    // Prevents clock/reset/enable trees (not on global buffers) from
+    // over-clustering sinks at the driver position.
+    int hpwl_fanout_threshold = 64;
 
     int hpwl_scale_x, hpwl_scale_y;
     int spread_scale_x, spread_scale_y;

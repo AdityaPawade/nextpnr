@@ -899,6 +899,20 @@ class HeAPPlacer
                 continue;
             if (cell_locs.at(ni->driver.cell->name).global)
                 continue;
+            // High-fanout nets (clock/reset/enable trees not on global buffers)
+            // pull all sinks to the driver position via HPWL.  At 88% LUT4 util
+            // this overcrowds specific columns.  Skip these nets in the solver
+            // (they will be routed via low-skew nets later).
+            if (cfg.hpwl_fanout_threshold > 0 &&
+                int(ni->users.entries()) >= cfg.hpwl_fanout_threshold)
+                continue;
+            // High-fanout nets (clock/reset/enable trees not on global buffers)
+            // pull all sinks to the driver position via HPWL.  At 88% LUT4 util
+            // this overcrowds specific columns.  Skip these nets in the solver
+            // (they will be routed via low-skew nets later).
+            if (cfg.hpwl_fanout_threshold > 0 &&
+                int(ni->users.entries()) >= cfg.hpwl_fanout_threshold)
+                continue;
             // Find the bounds of the net in this axis, and the ports that correspond to these bounds
             PortRef *lbport = nullptr, *ubport = nullptr;
             int lbpos = std::numeric_limits<int>::max(), ubpos = std::numeric_limits<int>::min();
@@ -1087,10 +1101,24 @@ class HeAPPlacer
 
             // At the moment we don't follow the full HeAP algorithm using cuts for legalisation, instead using
             // the simple greedy largest-macro-first approach.
+            dict<IdString, int> dbg_init_hist;
+            int dbg_max_chain = 0;
+            IdString dbg_max_chain_cell;
             for (auto cell : p->solve_cells) {
                 remaining.emplace(p->chain_size[cell->name] * p->cfg.get_cell_legalisation_weight(ctx, cell),
                                   cell->name);
+                dbg_init_hist[cell->type]++;
+                if (p->chain_size[cell->name] > dbg_max_chain) {
+                    dbg_max_chain = p->chain_size[cell->name];
+                    dbg_max_chain_cell = cell->name;
+                }
             }
+            dbg_total_to_legalise = int(p->solve_cells.size());
+            log_info("[heap-dbg] StrictLegaliser entry: %d cells, max chain size %d (cell %s)\n",
+                     dbg_total_to_legalise, dbg_max_chain,
+                     dbg_max_chain_cell != IdString() ? dbg_max_chain_cell.c_str(ctx) : "<none>");
+            for (auto &kv : dbg_init_hist)
+                log_info("[heap-dbg]   initial: %s : %d\n", kv.first.c_str(ctx), kv.second);
             ripup_radius = 2;
             chain_ripup_radius = std::max(p->max_x, p->max_y); // only ripup chains as last resort
             total_iters = 0;
@@ -1137,10 +1165,17 @@ class HeAPPlacer
             if (total_iters > int(p->solve_cells.size())) {
                 total_iters = 0;
                 ripup_radius = std::min(std::max(p->max_x, p->max_y), ripup_radius * 2);
+                log_info("[heap-dbg] cycled total_iters: ripup_radius -> %d\n", ripup_radius);
+            }
+            if (total_iters_noreset - dbg_last_log_iter >= dbg_log_every) {
+                dbg_last_log_iter = total_iters_noreset;
+                dbg_dump_progress("periodic", false);
             }
 
             if (p->cfg.iters_budget_multiplier > 0 &&
                 total_iters_noreset > std::max(5000, p->cfg.iters_budget_multiplier * int(ctx->cells.size()))) {
+                log_info("[heap-dbg] === FAILURE DUMP (iters budget exhausted) ===\n");
+                dbg_dump_progress("failure", /*full=*/true);
                 log_error("Unable to find legal placement for all cells, design is probably at utilisation limit. "
                           "Try `--placer-heap-iters-budget 64` (or higher) to give the legaliser more total attempts.\n");
             }
@@ -1190,6 +1225,16 @@ class HeAPPlacer
 
                 iter++;
                 iter_at_radius++;
+                dbg_cell_stuck_count[ci->name]++;
+                if (dbg_cell_stuck_count[ci->name] == 1000 || dbg_cell_stuck_count[ci->name] == 10000 ||
+                    dbg_cell_stuck_count[ci->name] == 100000) {
+                    int cx = p->cell_locs.count(ci->name) ? p->cell_locs.at(ci->name).x : -1;
+                    int cy = p->cell_locs.count(ci->name) ? p->cell_locs.at(ci->name).y : -1;
+                    log_info("[heap-dbg] cell stuck: %s (%s) attempt %d at radius %d, target (%d,%d)%s\n",
+                             ci->name.c_str(ctx), ci->type.c_str(ctx),
+                             dbg_cell_stuck_count[ci->name], radius, cx, cy,
+                             ci->cluster != ClusterId() ? " (in chain)" : "");
+                }
                 if (iter >= (10 * (radius + 1))) {
                     // No luck yet, increase radius
                     radius = std::min(std::max(p->max_x, p->max_y), radius + 1);
@@ -1272,6 +1317,56 @@ class HeAPPlacer
         bool placed;
         BelId bestBel;
         int best_inp_len;
+
+        // === Diagnostic instrumentation (gw5a-placer-fixes) ===
+        dict<IdString, int> dbg_cell_stuck_count;
+        dict<IdString, int> dbg_legalised_by_type;
+        int dbg_total_to_legalise = 0;
+        int dbg_log_every = 5000;
+        int dbg_last_log_iter = 0;
+        void dbg_dump_progress(const char *tag, bool full)
+        {
+            dict<IdString, int> remaining_by_type;
+            int rem_total = 0;
+            for (auto &kv : ctx->cells) {
+                CellInfo *ci = kv.second.get();
+                if (ci->udata == dont_solve) continue;
+                if (ci->bel == BelId()) {
+                    remaining_by_type[ci->type]++;
+                    rem_total++;
+                }
+            }
+            log_info("[heap-dbg] %s: total_iters=%d total_iters_noreset=%d radius=%d ripup_radius=%d\n",
+                     tag, total_iters, total_iters_noreset, radius, ripup_radius);
+            log_info("[heap-dbg] %s: legalised %d / %d, remaining %d (queued %d)\n",
+                     tag, dbg_total_to_legalise - rem_total, dbg_total_to_legalise, rem_total,
+                     int(remaining.size()));
+            log_info("[heap-dbg] %s: remaining cells by type:\n", tag);
+            for (auto &kv : remaining_by_type) {
+                log_info("[heap-dbg] %s:    %s : %d\n", tag, kv.first.c_str(ctx), kv.second);
+            }
+            std::vector<std::pair<int, IdString>> stuck;
+            for (auto &kv : dbg_cell_stuck_count) {
+                if (kv.second >= 1000) stuck.push_back({kv.second, kv.first});
+            }
+            std::sort(stuck.begin(), stuck.end(), std::greater<std::pair<int, IdString>>());
+            int top_n = full ? int(stuck.size()) : std::min(int(stuck.size()), 10);
+            log_info("[heap-dbg] %s: top %d stuck cells (total %d with stuck>=1000):\n",
+                     tag, top_n, int(stuck.size()));
+            for (int i = 0; i < top_n; i++) {
+                IdString name = stuck[i].second;
+                CellInfo *sci = ctx->cells.count(name) ? ctx->cells.at(name).get() : nullptr;
+                if (!sci) continue;
+                int cx = p->cell_locs.count(name) ? p->cell_locs.at(name).x : -1;
+                int cy = p->cell_locs.count(name) ? p->cell_locs.at(name).y : -1;
+                bool is_placed = (sci->bel != BelId());
+                log_info("[heap-dbg] %s:    [%d] %s (%s) stuck=%d target=(%d,%d) %s%s\n",
+                         tag, i, name.c_str(ctx), sci->type.c_str(ctx), stuck[i].first,
+                         cx, cy,
+                         is_placed ? "placed" : "UNPLACED",
+                         sci->cluster != ClusterId() ? " (in chain)" : "");
+            }
+        }
 
         typedef decltype(CellInfo::udata) cell_udata_t;
         cell_udata_t dont_solve = std::numeric_limits<cell_udata_t>::max();
@@ -2177,6 +2272,7 @@ PlacerHeapCfg::PlacerHeapCfg(Context *ctx)
     chainRipup = false;
 
     iters_budget_multiplier = ctx->setting<int>("placerHeap/itersBudgetMultiplier", 32);
+    hpwl_fanout_threshold = ctx->setting<int>("placerHeap/hpwlFanoutThreshold", 64);
 
     int timeout_divisor = ctx->setting<int>("placerHeap/cellPlacementTimeout", 8);
     if (timeout_divisor > 0) {

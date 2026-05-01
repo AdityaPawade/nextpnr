@@ -608,6 +608,9 @@ void GowinPacker::run(void)
     constrain_lutffs();
     ctx->check();
 
+    constrain_orphan_lutffs();
+    ctx->check();
+
     pack_pll();
     ctx->check();
 
