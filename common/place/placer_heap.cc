@@ -1139,8 +1139,10 @@ class HeAPPlacer
                 ripup_radius = std::min(std::max(p->max_x, p->max_y), ripup_radius * 2);
             }
 
-            if (total_iters_noreset > std::max(5000, 8 * int(ctx->cells.size()))) {
-                log_error("Unable to find legal placement for all cells, design is probably at utilisation limit.\n");
+            if (p->cfg.iters_budget_multiplier > 0 &&
+                total_iters_noreset > std::max(5000, p->cfg.iters_budget_multiplier * int(ctx->cells.size()))) {
+                log_error("Unable to find legal placement for all cells, design is probably at utilisation limit. "
+                          "Try `--placer-heap-iters-budget 64` (or higher) to give the legaliser more total attempts.\n");
             }
 
             if (p->cfg.ff_bel_bucket != BelBucketId() && !p->cfg.disableCtrlSet) {
@@ -2173,6 +2175,8 @@ PlacerHeapCfg::PlacerHeapCfg(Context *ctx)
     solverTolerance = 1e-5;
     placeAllAtOnce = false;
     chainRipup = false;
+
+    iters_budget_multiplier = ctx->setting<int>("placerHeap/itersBudgetMultiplier", 32);
 
     int timeout_divisor = ctx->setting<int>("placerHeap/cellPlacementTimeout", 8);
     if (timeout_divisor > 0) {

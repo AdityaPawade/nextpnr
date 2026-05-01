@@ -389,6 +389,9 @@ po::options_description CommandHandler::getGeneralOptions()
     general.add_options()("placer-heap-cell-placement-timeout", po::value<int>(),
                           "allow placer to attempt up to max(10000, total cells^2 / N) iterations to place a cell (int "
                           "N, default: 8, 0 for no timeout)");
+    general.add_options()("placer-heap-iters-budget", po::value<int>(),
+                          "total iterations budget for the legalise loop, expressed as a multiplier of cell "
+                          "count (int, default: 32; tight designs may need 64+; 0 disables the check)");
 
     general.add_options()("placer-heap-no-ctrl-set", "disable control set awareness in placer heap");
 
@@ -525,6 +528,10 @@ void CommandHandler::setupContext(Context *ctx)
     if (vm.count("placer-heap-cell-placement-timeout"))
         ctx->settings[ctx->id("placerHeap/cellPlacementTimeout")] =
                 std::to_string(std::max(0, vm["placer-heap-cell-placement-timeout"].as<int>()));
+
+    if (vm.count("placer-heap-iters-budget"))
+        ctx->settings[ctx->id("placerHeap/itersBudgetMultiplier")] =
+                std::to_string(std::max(0, vm["placer-heap-iters-budget"].as<int>()));
 
     if (vm.count("placer-heap-no-ctrl-set"))
         ctx->settings[ctx->id("placerHeap/noCtrlSet")] = true;

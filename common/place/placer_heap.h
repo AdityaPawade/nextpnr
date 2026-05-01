@@ -47,6 +47,13 @@ struct PlacerHeapCfg
     bool parallelRefine;
     bool chainRipup;
     int cell_placement_timeout;
+    // Total iterations budget for the legalise loop, expressed as a multiplier
+    // of cell count.  Defaults to 32 (= max(5000, 32*cells) total iterations across
+    // all cells in one legalisation pass).  Tight designs (e.g. Gowin GW5A-25 at
+    // 80%+ BSRAM utilisation) need a larger budget than the original default of 8.
+    // Set to 0 to disable the budget check entirely (loops indefinitely on truly
+    // unplaceable designs).
+    int iters_budget_multiplier = 32;
 
     int hpwl_scale_x, hpwl_scale_y;
     int spread_scale_x, spread_scale_y;
