@@ -611,6 +611,9 @@ void GowinPacker::run(void)
     pair_alu_dffs();
     ctx->check();
 
+    replicate_multi_fanout_lutffs();
+    ctx->check();
+
     // constrain_orphan_lutffs();  // disabled: violates slice_valid (FF.D must == LUT.F)
     // ctx->check();
 

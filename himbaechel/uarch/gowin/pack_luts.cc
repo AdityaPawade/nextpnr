@@ -711,6 +711,141 @@ void GowinPacker::pair_alu_dffs(void)
              paired, considered);
 }
 
+// =====================================================================
+// Replicate LUTs that drive multiple DFFs (multi-fanout LUT.F).
+//
+// constrain_lutffs() pairs each LUT with its FIRST DFF sink.  Any
+// additional DFFs sharing that LUT.F net become 'orphan' and block their
+// slice's LUT BEL.  This pass replicates the LUT for each additional
+// DFF: clones the LUT with same INIT and same input net connections,
+// disconnects the additional DFF's D from the original LUT's F net, and
+// connects D to the new replica's F net.  Then pairs replica + DFF in a
+// new LUTFF cluster.
+//
+// Top fanout pattern (top_i2s2_test): 32 LUTs each driving 32-63 DFFs
+// (likely combined enable/reset signals broadcast to register files).
+// Replicating these breaks the DFF cluster into many small clusters,
+// each placeable independently with control-set awareness.
+// =====================================================================
+void GowinPacker::replicate_multi_fanout_lutffs(void)
+{
+    const pool<IdString> lut_types{id_LUT1, id_LUT2, id_LUT3, id_LUT4};
+    const pool<IdString> dff_types{
+        id_DFF,    id_DFFE,   id_DFFN,    id_DFFNE,
+        id_DFFS,   id_DFFSE,  id_DFFNS,   id_DFFNSE,
+        id_DFFR,   id_DFFRE,  id_DFFNR,   id_DFFNRE,
+        id_DFFP,   id_DFFPE,  id_DFFNP,   id_DFFNPE,
+        id_DFFC,   id_DFFCE,  id_DFFNC,   id_DFFNCE
+    };
+
+    // Snapshot the LUT cells to iterate (we'll add new cells).
+    std::vector<CellInfo *> all_luts;
+    for (auto &cell : ctx->cells) {
+        CellInfo *ci = cell.second.get();
+        if (lut_types.count(ci->type)) all_luts.push_back(ci);
+    }
+
+    int replicas_created = 0;
+    int dffs_paired = 0;
+    std::vector<std::unique_ptr<CellInfo>> new_cells;
+
+    for (CellInfo *lut : all_luts) {
+        // Look at LUT's F output.
+        NetInfo *f_net = lut->getPort(id_F);
+        if (!f_net || f_net->users.empty()) continue;
+        if (f_net->users.entries() < 2) continue;  // only one user, no replication
+
+        // Collect orphan DFFs driven by this F net.
+        std::vector<CellInfo *> orphan_dff_users;
+        bool any_lut_paired_already = (lut->cluster != ClusterId());
+        for (auto &user : f_net->users) {
+            if (user.port != id_D) continue;
+            if (!dff_types.count(user.cell->type)) continue;
+            if (user.cell->cluster != ClusterId()) continue;  // already paired (with other lut?)
+            orphan_dff_users.push_back(user.cell);
+        }
+
+        if (orphan_dff_users.empty()) continue;
+
+        // If the LUT itself is unpaired AND there are orphan DFFs, pair the
+        // first DFF with the original LUT (this case can happen if
+        // constrain_lutffs missed it for some reason).
+        size_t start_idx = 0;
+        if (!any_lut_paired_already && !orphan_dff_users.empty()) {
+            CellInfo *first_dff = orphan_dff_users[0];
+            lut->cluster = lut->name;
+            lut->constr_abs_z = false;
+            lut->constr_children.push_back(first_dff);
+            first_dff->cluster = lut->name;
+            first_dff->constr_x = 0;
+            first_dff->constr_y = 0;
+            first_dff->constr_z = 1;
+            first_dff->constr_abs_z = false;
+            ++dffs_paired;
+            start_idx = 1;
+        }
+
+        // For each remaining orphan DFF, replicate the LUT and pair it.
+        for (size_t i = start_idx; i < orphan_dff_users.size(); ++i) {
+            CellInfo *dff = orphan_dff_users[i];
+
+            // Create the replica LUT cell (same type, same INIT, same inputs).
+            std::string repl_name = lut->name.str(ctx) + "_repl" + std::to_string(i);
+            IdString repl_id = ctx->id(repl_name);
+            auto repl_cell_uptr = std::make_unique<CellInfo>(ctx, repl_id, lut->type);
+            CellInfo *repl = repl_cell_uptr.get();
+
+            // Copy INIT parameter.
+            if (lut->params.count(id_INIT)) {
+                repl->params[id_INIT] = lut->params.at(id_INIT);
+            }
+
+            // Add input ports and connect to same nets as original LUT.
+            for (IdString in_port : {id_I0, id_I1, id_I2, id_I3}) {
+                if (lut->ports.count(in_port)) {
+                    NetInfo *in_net = lut->getPort(in_port);
+                    if (in_net) {
+                        repl->addInput(in_port);
+                        repl->connectPort(in_port, in_net);
+                    }
+                }
+            }
+
+            // Add F output port and create a new net for it.
+            std::string repl_net_name = repl_name + "_F";
+            NetInfo *repl_f_net = ctx->createNet(ctx->id(repl_net_name));
+            repl->addOutput(id_F);
+            repl->connectPort(id_F, repl_f_net);
+
+            // Disconnect DFF.D from original f_net, reconnect to repl_f_net.
+            dff->disconnectPort(id_D);
+            dff->connectPort(id_D, repl_f_net);
+
+            // Make repl the cluster root, dff the child.
+            repl->cluster = repl->name;
+            repl->constr_abs_z = false;
+            repl->constr_children.push_back(dff);
+            dff->cluster = repl->name;
+            dff->constr_x = 0;
+            dff->constr_y = 0;
+            dff->constr_z = 1;
+            dff->constr_abs_z = false;
+
+            new_cells.push_back(std::move(repl_cell_uptr));
+            ++replicas_created;
+            ++dffs_paired;
+        }
+    }
+
+    // Add the new cells to ctx.
+    for (auto &c : new_cells) {
+        ctx->cells[c->name] = std::move(c);
+    }
+
+    log_info("Replicated %d LUTs to pair %d additional orphan DFFs.\n",
+             replicas_created, dffs_paired);
+}
+
 void GowinPacker::pack_ssram(void)
 {
     std::vector<std::unique_ptr<CellInfo>> new_cells;
