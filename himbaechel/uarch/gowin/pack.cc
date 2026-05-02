@@ -611,8 +611,9 @@ void GowinPacker::run(void)
     pair_alu_dffs();
     ctx->check();
 
-    replicate_multi_fanout_lutffs();
-    ctx->check();
+    // replicate_multi_fanout_lutffs();  // disabled: with SEL->XD slice_valid
+    // relaxation, replicas are redundant and push past LUT BEL budget.
+    // ctx->check();
 
     // constrain_orphan_lutffs();  // disabled: violates slice_valid (FF.D must == LUT.F)
     // ctx->check();

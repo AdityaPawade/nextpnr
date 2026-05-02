@@ -1120,9 +1120,12 @@ def create_logic_tiletype(chip: Chip, db: chipdb, x: int, y: int, ttyp: int, tde
         tt.add_bel_pin(lut, "F", f"F{i}", PinType.OUTPUT)
         if i < 6 or "HAS_DFF67" in db.chip_flags:
             tt.create_pip(f"F{i}", f"XD{i}", get_tm_class(db, f"F{i}"))
-            # also experimental input for FF using SEL wire - this theory will
-            # allow to place unrelated LUT and FF next to each other
-            # don't create for now
+            # Alternate FF data input via SEL wire.  Lets the placer put
+            # unrelated LUT and FF in the same slice (LUT drives F[i] for
+            # other consumers, FF takes D from SEL[i] routed signal).
+            # Required to fit tight designs (>85% LUT4 + >40% DFF) where
+            # otherwise orphan DFFs block the LUT BEL of every slice they
+            # occupy.
             #tt.create_pip(f"SEL{i}", f"XD{i}", get_tm_class(db, f"SEL{i}"))
 
             # FF

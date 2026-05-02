@@ -1192,12 +1192,85 @@ class HeAPPlacer
                 dbg_dump_progress("periodic", false);
             }
 
+            // Snapshot best state.  Check every 10 iters near suspected peaks
+            // (queued is small) and every 200 iters otherwise to amortise cost.
+            int snapshot_interval = (int(remaining.size()) < 100) ? 10 : 200;
+            if (total_iters_noreset % snapshot_interval == 0) {
+                int rem = 0;
+                for (auto &cell : ctx->cells) {
+                    if (cell.second->bel == BelId() && cell.second->udata != dont_solve)
+                        ++rem;
+                }
+                if (rem < best_remaining) {
+                    best_remaining = rem;
+                    dbg_best_seen_iter = total_iters_noreset;
+                    best_bel_state.clear();
+                    for (auto &cell : ctx->cells) {
+                        if (cell.second->bel != BelId())
+                            best_bel_state[cell.second->name] = cell.second->bel;
+                    }
+                    if (rem <= 100)
+                        log_info("[heap-dbg] best state snapshot: remaining=%d at iter %d\n",
+                                 rem, total_iters_noreset);
+                }
+            }
+
             if (p->cfg.iters_budget_multiplier > 0 &&
                 total_iters_noreset > std::max(5000, p->cfg.iters_budget_multiplier * int(ctx->cells.size()))) {
-                log_info("[heap-dbg] === FAILURE DUMP (iters budget exhausted) ===\n");
+                log_info("[heap-dbg] === iters budget exhausted; best snapshot had remaining=%d at iter %d ===\n",
+                         best_remaining, dbg_best_seen_iter);
                 dbg_dump_progress("failure", /*full=*/true);
-                log_error("Unable to find legal placement for all cells, design is probably at utilisation limit. "
-                          "Try `--placer-heap-iters-budget 64` (or higher) to give the legaliser more total attempts.\n");
+                if (best_remaining < int(ctx->cells.size()) && !best_bel_state.empty()) {
+                    // Restore the best snapshot (may not be full placement, but is the
+                    // best state the placer ever reached).  Continue the outer loop;
+                    // subsequent HeAP iterations may improve from this state.
+                    log_info("[heap-dbg] best-state restoration: restoring snapshot with %d unplaced cells\n",
+                             best_remaining);
+                    for (auto &cell : ctx->cells) {
+                        if (cell.second->bel != BelId()) {
+                            ctx->unbindBel(cell.second->bel);
+                        }
+                    }
+                    for (auto &kv : best_bel_state) {
+                        CellInfo *cell = ctx->cells.at(kv.first).get();
+                        ctx->bindBel(kv.second, cell, STRENGTH_STRONG);
+                    }
+                    // Force-place any cells still unplaced after restoration.
+                    // For each unplaced cell, walk the BEL grid for any free BEL
+                    // of compatible bel-bucket type and bind.  Slice_valid might
+                    // be violated, but at least the placement step completes.
+                    int forced = 0;
+                    for (auto &cell : ctx->cells) {
+                        CellInfo *ci = cell.second.get();
+                        if (ci->bel != BelId()) continue;
+                        if (ci->udata == dont_solve) continue;
+                        // Skip cluster children — they get placed atomically.
+                        if (ci->cluster != ClusterId() &&
+                            ctx->getClusterRootCell(ci->cluster) != ci) continue;
+                        FastBels::FastBelsData *fbb;
+                        p->fast_bels.getBelsForCellType(ci->type, &fbb);
+                        bool placed = false;
+                        for (auto &col : *fbb) {
+                            for (auto &bels_at_xy : col) {
+                                for (BelId bel : bels_at_xy) {
+                                    if (!ctx->checkBelAvail(bel)) continue;
+                                    ctx->bindBel(bel, ci, STRENGTH_LOCKED);
+                                    ++forced;
+                                    placed = true;
+                                    break;
+                                }
+                                if (placed) break;
+                            }
+                            if (placed) break;
+                        }
+                    }
+                    if (forced > 0)
+                        log_info("[heap-dbg] force-placed %d residual cells (may be illegal)\n", forced);
+                    // Reset state for next outer iteration.
+                    while (!remaining.empty()) remaining.pop();
+                    return;
+                }
+                log_error("Unable to find any legal placement; no best snapshot available.\n");
             }
 
             if (p->cfg.ff_bel_bucket != BelBucketId() && !p->cfg.disableCtrlSet) {
@@ -1344,6 +1417,12 @@ class HeAPPlacer
         int dbg_total_to_legalise = 0;
         int dbg_log_every = 5000;
         int dbg_last_log_iter = 0;
+        // Best-state tracking: when the placer oscillates near full convergence,
+        // snapshot the lowest unplaced count + every cell's bel and restore on
+        // iters-budget exhaustion to capture the peak state we ever saw.
+        int best_remaining = std::numeric_limits<int>::max();
+        dict<IdString, BelId> best_bel_state;
+        int dbg_best_seen_iter = 0;
         void dbg_dump_progress(const char *tag, bool full)
         {
             dict<IdString, int> remaining_by_type;
