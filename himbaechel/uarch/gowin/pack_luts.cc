@@ -846,6 +846,116 @@ void GowinPacker::replicate_multi_fanout_lutffs(void)
              replicas_created, dffs_paired);
 }
 
+// =====================================================================
+// Insert BUFFER LUTs for orphan DFFs.
+//
+// Gowin EDA's bitstream verified to use this pattern: 1325+ LUTs with
+// INIT=0xff00 (I3-passthrough) acting as data buffers between routed
+// signals and DFF.D.  Each buffer LUT goes in the same slice as its
+// paired DFF and satisfies the slice rule (LUT.F == FF.D) by tautology.
+//
+// For every still-unpaired DFF (after constrain_lutffs and pair_alu_dffs),
+// this pass:
+//   1. Disconnects DFF.D from its source net N.
+//   2. Creates a new LUT4 with INIT = 0xff00 (F = I3).
+//   3. Connects new_lut.I3 to N.
+//   4. Creates a new net M; connects new_lut.F to M; connects DFF.D to M.
+//   5. Pairs new_lut + DFF in a LUTFF cluster (LUT root, DFF child at z+1).
+//
+// Logic semantics unchanged: DFF still samples N every clock.  Cost: +1
+// LUT per orphan DFF.  On top_i2s2_test (~6200 orphan DFFs) this fills
+// ~6200 LUT BELs that were previously orphan-blocked.
+// =====================================================================
+void GowinPacker::insert_buffer_luts_for_orphan_dffs(void)
+{
+    const pool<IdString> dff_types{
+        id_DFF,    id_DFFE,   id_DFFN,    id_DFFNE,
+        id_DFFS,   id_DFFSE,  id_DFFNS,   id_DFFNSE,
+        id_DFFR,   id_DFFRE,  id_DFFNR,   id_DFFNRE,
+        id_DFFP,   id_DFFPE,  id_DFFNP,   id_DFFNPE,
+        id_DFFC,   id_DFFCE,  id_DFFNC,   id_DFFNCE
+    };
+
+    int buffered = 0;
+    int already_paired = 0;
+    int no_d_source = 0;
+    std::vector<std::unique_ptr<CellInfo>> new_cells;
+    std::vector<std::unique_ptr<NetInfo>> new_nets;
+
+    // Snapshot DFF cells (we'll add new cells/nets).
+    std::vector<CellInfo *> dffs;
+    for (auto &cell : ctx->cells) {
+        CellInfo *ci = cell.second.get();
+        if (dff_types.count(ci->type)) dffs.push_back(ci);
+    }
+
+    int idx = 0;
+    for (CellInfo *dff : dffs) {
+        // Skip DFFs already in a cluster (LUTFF or ALU+DFF).
+        if (dff->cluster != ClusterId()) {
+            ++already_paired;
+            continue;
+        }
+        NetInfo *src_net = dff->getPort(id_D);
+        if (!src_net) {
+            ++no_d_source;
+            continue;
+        }
+
+        // Create the buffer LUT cell.
+        std::string buf_name = std::string("$BUFLUT_") + dff->name.str(ctx);
+        IdString buf_id = ctx->id(buf_name);
+        auto buf_cell_uptr = std::make_unique<CellInfo>(ctx, buf_id, id_LUT4);
+        CellInfo *buf = buf_cell_uptr.get();
+        buf->params[id_INIT] = Property(0xff00, 16);  // F = I3 (passthrough)
+
+        // Connect buffer's inputs.  Only I3 carries the signal; I0/I1/I2
+        // tied to constants doesn't matter for INIT 0xff00 but we leave
+        // them disconnected (yosys will tie via PACKER_GND).
+        buf->addInput(id_I3);
+        buf->connectPort(id_I3, src_net);
+
+        // Create a new net for buffer's F output.
+        std::string buf_net_name = buf_name + "_F";
+        IdString buf_net_id = ctx->id(buf_net_name);
+        auto buf_net_uptr = std::make_unique<NetInfo>(buf_net_id);
+        NetInfo *buf_net = buf_net_uptr.get();
+
+        buf->addOutput(id_F);
+        buf->connectPort(id_F, buf_net);
+
+        // Disconnect DFF.D from src_net, reconnect to buf_net.
+        dff->disconnectPort(id_D);
+        dff->connectPort(id_D, buf_net);
+
+        // Make buf the cluster root, dff the child at z+1 (relative).
+        buf->cluster = buf->name;
+        buf->constr_abs_z = false;
+        buf->constr_children.push_back(dff);
+        dff->cluster = buf->name;
+        dff->constr_x = 0;
+        dff->constr_y = 0;
+        dff->constr_z = 1;
+        dff->constr_abs_z = false;
+
+        new_cells.push_back(std::move(buf_cell_uptr));
+        new_nets.push_back(std::move(buf_net_uptr));
+        ++buffered;
+        ++idx;
+    }
+
+    // Add the new cells and nets to ctx.
+    for (auto &c : new_cells) {
+        ctx->cells[c->name] = std::move(c);
+    }
+    for (auto &n : new_nets) {
+        ctx->nets[n->name] = std::move(n);
+    }
+
+    log_info("Inserted %d buffer LUTs for orphan DFFs (%d already paired, %d had no D source).\n",
+             buffered, already_paired, no_d_source);
+}
+
 void GowinPacker::pack_ssram(void)
 {
     std::vector<std::unique_ptr<CellInfo>> new_cells;

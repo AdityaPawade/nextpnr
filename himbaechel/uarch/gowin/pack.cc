@@ -611,9 +611,11 @@ void GowinPacker::run(void)
     pair_alu_dffs();
     ctx->check();
 
-    // replicate_multi_fanout_lutffs();  // disabled: with SEL->XD slice_valid
-    // relaxation, replicas are redundant and push past LUT BEL budget.
-    // ctx->check();
+    // Insert passthrough LUT4 (INIT=0xff00) for any DFF still unpaired.
+    // This mirrors what Gowin EDA does (verified via gowin_unpack of a
+    // reference bitstream: 1325+ buffer LUTs with INIT=0xff00).
+    insert_buffer_luts_for_orphan_dffs();
+    ctx->check();
 
     // constrain_orphan_lutffs();  // disabled: violates slice_valid (FF.D must == LUT.F)
     // ctx->check();
