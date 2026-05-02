@@ -879,6 +879,7 @@ void GowinPacker::insert_buffer_luts_for_orphan_dffs(void)
     int buffered = 0;
     int already_paired = 0;
     int no_d_source = 0;
+    int skipped_for_budget = 0;
     std::vector<std::unique_ptr<CellInfo>> new_cells;
     std::vector<std::unique_ptr<NetInfo>> new_nets;
 
@@ -888,6 +889,25 @@ void GowinPacker::insert_buffer_luts_for_orphan_dffs(void)
         CellInfo *ci = cell.second.get();
         if (dff_types.count(ci->type)) dffs.push_back(ci);
     }
+
+    // Compute LUT BEL budget cap.  Chip's LUT4 BEL count minus existing LUTs
+    // (LUT1/2/3/4 + ALU's BLOCKER_LUT) leaves a budget for buffer LUTs.
+    // We leave ~500 BELs of headroom for placement flexibility (so the
+    // placer doesn't get stuck trying to fit the very last LUT).
+    int total_lut_bels = 23040;  // GW5A-25
+    int existing_luts = 0;
+    for (auto &cell : ctx->cells) {
+        IdString t = cell.second->type;
+        if (t.in(id_LUT1, id_LUT2, id_LUT3, id_LUT4, id_BLOCKER_LUT)) {
+            ++existing_luts;
+        }
+        // MUX2_LUT5/6/7/8 children are LUT4-typed and counted above.
+    }
+    const int HEADROOM = 500;
+    int max_buffers = total_lut_bels - existing_luts - HEADROOM;
+    if (max_buffers < 0) max_buffers = 0;
+    log_info("Buffer-LUT budget: %d LUT BELs total, %d existing LUTs, %d max buffers (HEADROOM=%d).\n",
+             total_lut_bels, existing_luts, max_buffers, HEADROOM);
 
     int idx = 0;
     for (CellInfo *dff : dffs) {
@@ -899,6 +919,14 @@ void GowinPacker::insert_buffer_luts_for_orphan_dffs(void)
         NetInfo *src_net = dff->getPort(id_D);
         if (!src_net) {
             ++no_d_source;
+            continue;
+        }
+
+        // Skip if we'd exceed the LUT BEL budget.  Remaining orphan DFFs
+        // get placed in empty-LUT slices instead (slice_valid permits FF
+        // alone in slice with no LUT).
+        if (buffered >= max_buffers) {
+            ++skipped_for_budget;
             continue;
         }
 
@@ -952,8 +980,8 @@ void GowinPacker::insert_buffer_luts_for_orphan_dffs(void)
         ctx->nets[n->name] = std::move(n);
     }
 
-    log_info("Inserted %d buffer LUTs for orphan DFFs (%d already paired, %d had no D source).\n",
-             buffered, already_paired, no_d_source);
+    log_info("Inserted %d buffer LUTs for orphan DFFs (%d already paired, %d no D source, %d skipped for budget).\n",
+             buffered, already_paired, no_d_source, skipped_for_budget);
 }
 
 void GowinPacker::pack_ssram(void)
