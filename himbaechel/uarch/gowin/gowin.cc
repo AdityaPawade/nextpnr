@@ -19,6 +19,9 @@
 
 #include "placer_heap.h"
 
+// Codex round 12 Step 4: SEL[i] rejection counter (instrumentation)
+namespace { std::atomic<uint64_t> g_sel_i_reject_count{0}; }
+
 NEXTPNR_NAMESPACE_BEGIN
 
 namespace {
@@ -908,6 +911,9 @@ void GowinImpl::prePlace()
 
 void GowinImpl::postPlace()
 {
+    log_info("[Codex round 12] SEL[i] rejection count during placement: %llu\n",
+             (unsigned long long)g_sel_i_reject_count.load(std::memory_order_relaxed));
+
     if (ctx->debug) {
         log_info("================== Final Placement ===================\n");
         for (auto &cell : ctx->cells) {
@@ -1365,6 +1371,19 @@ bool GowinImpl::slice_valid(int x, int y, int z) const
     auto &bels = fast_logic_cell.at(x, y);
     const CellInfo *lut = bels.at(z * 2);
     const CellInfo *ff = bels.at(z * 2 + 1);
+
+    // Phase 7e: GSR cell's GSRI port maps to LSR0 wire of its tile.
+    // FFs in slots 0,1 share LSR0 via R/S/C/P ports. If GSR is in this
+    // tile, reject any FF placement at slot 0 or 1 to avoid router LSR0
+    // conflict ($PACKER_VCC from GSR.GSRI vs $PACKER_GND from FF.R).
+    if (ff && ff->type != id_BLOCKER_FF && (z == 0 || z == 1)) {
+        for (BelId b : ctx->getBelsByTile(x, y)) {
+            if (ctx->getBelType(b) != id_GSR) continue;
+            if (ctx->getBoundBelCell(b) != nullptr) {
+                return false;
+            }
+        }
+    }
     // There are only 6 ALUs
     const CellInfo *alu = (z < 6) ? bels.at(z + BelZ::ALU0_Z) : nullptr;
     const CellInfo *ramw = bels.at(BelZ::RAMW_Z);
@@ -1418,14 +1437,38 @@ bool GowinImpl::slice_valid(int x, int y, int z) const
         const NetInfo *src;
         // check implcit LUT(ALU) -> FF connection
         NPNR_ASSERT(!ramw); // XXX shouldn't happen for now
-        if (lut || alu) {
-            if (lut && lut->type != id_BLOCKER_LUT) {
-                src = fast_cell_info.at(lut->flat_index).lut_f;
-            } else {
-                src = fast_cell_info.at(alu->flat_index).alu_sum;
-            }
+        if (alu) {
+            // ALU-driven FF: must use ALU sum directly (no REG_SD path).
+            src = fast_cell_info.at(alu->flat_index).alu_sum;
             if (ff_data.ff_d != src) {
                 return false;
+            }
+        } else if (lut && lut->type != id_BLOCKER_LUT) {
+            // GW5A REG_SD relaxation (Phase 5, restored):
+            // Allow LUT + unrelated FF in same slot. FF takes data via SEL[z]
+            // route (REG_SD bit = 1). Companion fix: canonicalize_inactive_lsr_ports
+            // (rewires inactive VCC-on-LSR to GND so router doesnt see two
+            // nets driving same LSR0 wire).
+            src = fast_cell_info.at(lut->flat_index).lut_f;
+            // SEL[z] mux/FF-D conflict check (Codex round 10, 2026-05-05):
+            // SEL[z] is physically shared between wide-LUT mux S0 input and
+            // FF-D alternate routing path SEL[z] -> XD[z]. If FF at slice z
+            // takes data via the SEL[z]->XD[z] alternate path (ff.D != lut.F),
+            // and a wide mux at this tile uses SEL[z] for a *different* net,
+            // the placement is physically illegal. router2 catches it as
+            // "attempting to reserve sink input path wire .../SEL0 for nets X and Y".
+            if (ff_data.ff_d != src) {
+                BelId mux_bel = ctx->getBelByLocation(Loc(x, y, mux_z.at(z)));
+                CellInfo *mux_cell = ctx->getBoundBelCell(mux_bel);
+                if (mux_cell != nullptr &&
+                    (mux_cell->type == id_MUX2_LUT5 || mux_cell->type == id_MUX2_LUT6 ||
+                     mux_cell->type == id_MUX2_LUT7 || mux_cell->type == id_MUX2_LUT8)) {
+                    NetInfo *mux_sel = mux_cell->getPort(id_S0);
+                    if (mux_sel != nullptr && mux_sel != ff_data.ff_d) {
+                        g_sel_i_reject_count.fetch_add(1, std::memory_order_relaxed);
+                        return false;
+                    }
+                }
             }
         }
         if (adj_ff) {
@@ -1433,7 +1476,11 @@ bool GowinImpl::slice_valid(int x, int y, int z) const
                 return false;
             }
 
-            // CE, LSR and CLK must match
+            // Phase 7d (revert canon): ORIGINAL strict LSR check restored.
+            // The router refuses to merge $PACKER_GND and $PACKER_VCC arcs
+            // both targeting LSR0, so the placer must NOT place adj FFs
+            // with mismatched LSR nets even if both are "semantically inactive".
+            // Strict equality is the only safe rule.
             const auto &adj_ff_data = fast_cell_info.at(adj_ff->flat_index);
             if (adj_ff_data.ff_lsr != ff_data.ff_lsr) {
                 return false;

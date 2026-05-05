@@ -1392,6 +1392,12 @@ struct Router2
                     if (!bind_and_check(net, usr.index, phys_pin)) {
                         ++arch_fail;
                         success = false;
+                        log_warning("router2 arch_fail net=%s usr_cell=%s usr_port=%s usr_idx=%d phys_pin=%zu\n",
+                                    ctx->nameOf(net),
+                                    usr.value.cell ? ctx->nameOf(usr.value.cell) : "(null)",
+                                    usr.value.port.c_str(ctx),
+                                    usr.index.idx(),
+                                    phys_pin);
                     }
                 }
             }

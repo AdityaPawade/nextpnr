@@ -37,6 +37,12 @@ void GowinPacker::pack_gsr(void)
         auto gsr_cell = std::make_unique<CellInfo>(ctx, id_GSR, id_GSR);
         gsr_cell->addInput(id_GSRI);
         gsr_cell->connectPort(id_GSRI, ctx->nets.at(ctx->id("$PACKER_VCC")).get());
+        // Phase 7d fix: GSR.GSRI port maps to LSR0 wire of its slice (per
+        // apicula chipdb extra_func gsr.wire="LSR0"). FFs placed in slots
+        // 0,1 of the SAME slice would have R/S/C/P also targeting LSR0 ->
+        // router LSR0 conflict ($PACKER_VCC vs $PACKER_GND).
+        // Find the GSR bel location and reserve FF slots 0,1 there with
+        // BLOCKER_FF cells (similar to RAM16SDP4 blocker pattern).
         ctx->cells[gsr_cell->name] = std::move(gsr_cell);
     }
     if (ctx->verbose) {
@@ -291,26 +297,42 @@ void GowinPacker::pack_buffered_nets(void)
             if (ctx->settings.count(id_NO_GP_CLOCK_ROUTING)) {
                 continue;
             }
-            if (gwu.driver_is_clksrc(ni->driver) || (!gwu.driver_is_io(ni->driver))) {
-                // no need for buffering
-                continue;
-            }
-            // check users for the clock inputs
-            bool has_clock_users = false;
+            // Count clock users (port = CLK*) — also used to decide whether
+            // a GCLK-pin driver needs explicit BUFG (Phase 6 fix per Codex
+            // round 12: high-fanout clocks need BUFG even on GCLK pins
+            // because the implicit GP global routing fails for >50 loads).
+            int clock_fanout = 0;
             for (auto usr : ni->users) {
                 if (usr.port.in(id_CLKIN, id_CLK, id_CLK0, id_CLK1, id_CLK2, id_CLK3, id_CLKFB)) {
-                    // Latch gate signals drive CLK pins but are not clocks
                     if (usr.port == id_CLK && usr.cell->attrs.count(id_LATCH))
                         continue;
-                    has_clock_users = true;
-                    break;
+                    ++clock_fanout;
                 }
             }
-            if (!has_clock_users) {
-                continue;
-            }
-            if (ctx->verbose) {
-                log_info("Add buffering to a potentially clock network '%s'\n", ctx->nameOf(ni));
+            const int CLOCK_BUFG_FANOUT_THRESHOLD = 1;  // Phase 8: re-enable BUFG forcing for any clock-port user (disabled by 7f, but tribuf flow needs it)
+            if (gwu.driver_is_clksrc(ni->driver) || (!gwu.driver_is_io(ni->driver))) {
+                // Pre-Phase-6: skip if driver is already a clock source.
+                // Phase 6: still skip UNLESS clock fanout exceeds threshold.
+                // Top-level GCLK-pin clock with thousands of FF loads cannot
+                // be auto-routed onto the global network without an explicit
+                // BUFG — fall through to BUFG insertion below.
+                if (clock_fanout < CLOCK_BUFG_FANOUT_THRESHOLD) {
+                    continue;
+                }
+                // High-fanout clock on GCLK pin: force BUFG insertion.
+                if (ctx->verbose) {
+                    log_info("Force BUFG on high-fanout (%d) GCLK-pin net '%s'\n",
+                             clock_fanout, ctx->nameOf(ni));
+                }
+            } else {
+                // Driver is an IBUF on a non-GCLK pin: existing behavior
+                // (BUFG only if clock-port users exist).
+                if (clock_fanout == 0) {
+                    continue;
+                }
+                if (ctx->verbose) {
+                    log_info("Add buffering to a potentially clock network '%s'\n", ctx->nameOf(ni));
+                }
             }
         }
 
@@ -617,6 +639,10 @@ void GowinPacker::run(void)
     insert_buffer_luts_for_orphan_dffs();
     ctx->check();
 
+    // Phase 7 LSR canonicalize — MOVED to end of pack pipeline (Phase 7c)
+    // so it catches VCC connections added by pack_pll, pack_bsram, pack_dsp,
+    // pack_buffered_nets, pack_dqce, etc.
+
     // constrain_orphan_lutffs();  // disabled: violates slice_valid (FF.D must == LUT.F)
     // ctx->check();
 
@@ -648,6 +674,12 @@ void GowinPacker::run(void)
     ctx->check();
 
     pack_dcs();
+    ctx->check();
+
+    // Phase 7c: LSR canonicalize MOVED here from earlier in pipeline so it
+    // catches VCC connections added by pack_pll, pack_bsram, pack_dsp,
+    // pack_buffered_nets, pack_dqce, pack_dcs, etc.
+    normalize_inactive_lsr_ports();
     ctx->check();
 
     ctx->fixupHierarchy();

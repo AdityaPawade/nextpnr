@@ -1126,7 +1126,7 @@ def create_logic_tiletype(chip: Chip, db: chipdb, x: int, y: int, ttyp: int, tde
             # Required to fit tight designs (>85% LUT4 + >40% DFF) where
             # otherwise orphan DFFs block the LUT BEL of every slice they
             # occupy.
-            #tt.create_pip(f"SEL{i}", f"XD{i}", get_tm_class(db, f"SEL{i}"))
+            tt.create_pip(f"SEL{i}", f"XD{i}", get_tm_class(db, f"SEL{i}"))
 
             # FF
             ff = tt.create_bel(f"DFF{i}", "DFF", z =(i * 2 + 1))

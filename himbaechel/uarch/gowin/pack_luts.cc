@@ -1084,4 +1084,142 @@ void GowinPacker::pack_ssram(void)
     }
 }
 
+
+
+// =====================================================================
+// Phase 5: Disconnect LSR-related ports tied to inactive constants.
+//
+// Problem: GW5A FF cells (DFF/DFFR/DFFP/DFFC/DFFS/.../DFFNR/etc) all
+// share a single LSR[i] wire per CLS pair for SET/RESET/PRESET/CLEAR.
+// When two FFs in the same CLS have ports tied to different inactive
+// constants (e.g., FF1.RESET=PACKER_GND inactive vs FF2.PRESET=PACKER_VCC
+// inactive), the router tries to route both nets to the same physical
+// LSR0 wire and fails.
+//
+// slice_valid LSR canonicalization (Phase 3) treats nullptr/PACKER_GND/
+// PACKER_VCC as semantically equivalent during placement. Now we extend
+// the canonicalization to the netlist itself: any LSR-related port whose
+// driver is a constant (GND/VCC/PACKER_GND/PACKER_VCC) is disconnected
+// pre-route. The bitstream emitter then sees an unconnected LSR port and
+// emits the FF in its no-LSR mode (the cell type default).
+// =====================================================================
+// =====================================================================
+// Phase 7 (Codex round 15 fix): REWIRE inactive-constant LSR ports to a
+// canonical net instead of DISCONNECTING.
+//
+// Original problem (bisection result 2026-05-04):
+//   Phase 5s normalize_inactive_lsr_ports() disconnected R/S/C/P ports
+//   tied to constants. While that avoided the routers
+//   "$PACKER_GND vs $PACKER_VCC into same LSR0 wire" error, it left the
+//   physical LSR wire UNDRIVEN at runtime — the chip configures (DONE
+//   asserts) but FFs see spurious resets and the design wedges.
+//
+// Hardware bisection on a tiny LED counter confirmed:
+//   - With normalize_inactive_lsr_ports() active: DONE on, LED stuck off
+//   - With it reverted (and other Phase 5 patches reverted):
+//     DONE on, LED blinks
+//
+// The proper fix (Option A per Codex round 15): rewire VCC-on-LSR to GND
+// for cells where the LSR port is active-HIGH (per yosys cells_sim.v, ALL
+// Gowin DFF* with R/S/C/P ports use active-HIGH semantics). This:
+//   - Eliminates router GND-vs-VCC conflict (one canonical net)
+//   - KEEPS the LSR wire driven (no spurious resets)
+//   - For cells unintentionally on VCC ("always reset" — broken design),
+//     converts to "no reset" (FF runs normally instead of wedged)
+//   - For cells legitimately on GND, no change
+// =====================================================================
+void GowinPacker::normalize_inactive_lsr_ports(void)
+{
+    // Phase 7b (more aggressive): walk ALL cells, check ANY port named
+    // SET/RESET/PRESET/CLEAR/WRE for constant connections, rewire VCC-driving
+    // to canonical $PACKER_GND. This catches:
+    //   - All DFF* variants (port name match)
+    //   - RAM16SDP4 WRE port (also targets LSR2 wire per gowin_arch_gen.py)
+    //   - Other LSR-mapped pins we may not know about
+    //
+    // Uses driver-cell-TYPE check (id_VCC) rather than just net name match,
+    // in case yosys produces multiple distinct VCC/GND nets.
+    pool<IdString> lsr_port_names = {id_SET, id_RESET, id_PRESET, id_CLEAR, id_WRE};
+
+    NetInfo *gnd_net = nullptr;
+    if (ctx->nets.count(ctx->id("$PACKER_GND"))) {
+        gnd_net = ctx->nets.at(ctx->id("$PACKER_GND")).get();
+    }
+    if (gnd_net == nullptr) {
+        log_info("LSR canonicalize: $PACKER_GND not found, skipping.\n");
+        return;
+    }
+
+    auto is_vcc_constant = [&](NetInfo *n) -> bool {
+        if (n == nullptr) return false;
+        // By net name
+        if (n->name == ctx->id("$PACKER_VCC")) return true;
+        // By driver cell type
+        if (n->driver.cell != nullptr) {
+            IdString dt = n->driver.cell->type;
+            if (dt == id_VCC) return true;
+        }
+        return false;
+    };
+
+    auto is_gnd_constant = [&](NetInfo *n) -> bool {
+        if (n == nullptr) return false;
+        if (n->name == ctx->id("$PACKER_GND")) return true;
+        if (n->driver.cell != nullptr) {
+            IdString dt = n->driver.cell->type;
+            if (dt == id_GND) return true;
+        }
+        return false;
+    };
+
+    int rewired_vcc_to_gnd = 0;
+    int already_gnd = 0;
+    int real_signal = 0;
+    dict<IdString, int> ports_per_celltype;
+    // DEBUG: scan ALL cells, log any that have VCC connection on any port
+    int debug_count = 0;
+    for (auto &cell : ctx->cells) {
+        CellInfo *ci = cell.second.get();
+        for (auto &port_pair : ci->ports) {
+            IdString port = port_pair.first;
+            NetInfo *n = ci->getPort(port);
+            if (n && n->name == ctx->id("$PACKER_VCC")) {
+                if (debug_count < 30) {
+                    log_info("DEBUG VCC: cell %s (type=%s) port=%s on $PACKER_VCC\n",
+                             ci->name.c_str(ctx), ci->type.c_str(ctx), port.c_str(ctx));
+                }
+                ++debug_count;
+            }
+        }
+    }
+    log_info("DEBUG: total cell-port pairs on $PACKER_VCC: %d\n", debug_count);
+
+    for (auto &cell : ctx->cells) {
+        CellInfo *ci = cell.second.get();
+        for (IdString port : lsr_port_names) {
+            if (!ci->ports.count(port)) continue;
+            NetInfo *n = ci->getPort(port);
+            if (n == nullptr) continue;
+            if (is_vcc_constant(n)) {
+                ci->disconnectPort(port);
+                ci->connectPort(port, gnd_net);
+                ++rewired_vcc_to_gnd;
+                ports_per_celltype[ci->type]++;
+            } else if (is_gnd_constant(n)) {
+                ++already_gnd;
+            } else {
+                ++real_signal;
+            }
+        }
+    }
+    log_info("LSR canonicalize: rewired %d VCC-on-LSR ports to GND; %d already on GND; %d real signals.\n",
+             rewired_vcc_to_gnd, already_gnd, real_signal);
+    if (rewired_vcc_to_gnd > 0) {
+        log_info("  Rewired by cell type:\n");
+        for (auto &kv : ports_per_celltype) {
+            log_info("    %s: %d\n", kv.first.c_str(ctx), kv.second);
+        }
+    }
+}
+
 NEXTPNR_NAMESPACE_END

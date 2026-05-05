@@ -113,6 +113,7 @@ struct GowinPacker
     void pair_alu_dffs(void);
     void replicate_multi_fanout_lutffs(void);
     void insert_buffer_luts_for_orphan_dffs(void);
+    void normalize_inactive_lsr_ports(void);
     std::unique_ptr<CellInfo> ssram_make_lut(Context *ctx, CellInfo *ci, int index);
 
     // BSRAM
