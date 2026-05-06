@@ -1262,22 +1262,33 @@ void GowinImpl::create_passthrough_luts(void)
     }
 }
 
-// DFFs must be same type or compatible
+// DFFs must have compatible LSR kind. Round 24 fix:
+// GW5A slice has ONE REGSET fuse selecting RESET vs SET vs CLEAR vs PRESET.
+// Two FFs in the same slice pair can only share that fuse if their LSR kinds
+// match (or one of them has no LSR at all). Previous logic explicitly allowed
+// RESET+SET and CLEAR+PRESET pairs, which is physically impossible: the
+// hardware can encode one polarity, not both. Result was that one FF per
+// such pair came up in the wrong reset state, scattered across the design,
+// breaking boot at scale (P15B etc.) while small designs (top_oled_direct)
+// happened to dodge it because the placer never collided incompatible kinds.
+enum FfLsrKind { LSR_NONE_KIND, LSR_RESET_KIND, LSR_SET_KIND, LSR_CLEAR_KIND, LSR_PRESET_KIND };
+
+static FfLsrKind ff_lsr_kind(IdString t)
+{
+    if (t.in(id_DFFR, id_DFFRE, id_DFFNR, id_DFFNRE)) return LSR_RESET_KIND;
+    if (t.in(id_DFFS, id_DFFSE, id_DFFNS, id_DFFNSE)) return LSR_SET_KIND;
+    if (t.in(id_DFFC, id_DFFCE, id_DFFNC, id_DFFNCE)) return LSR_CLEAR_KIND;
+    if (t.in(id_DFFP, id_DFFPE, id_DFFNP, id_DFFNPE)) return LSR_PRESET_KIND;
+    return LSR_NONE_KIND;
+}
+
 inline bool incompatible_ffs(const CellInfo *ff, const CellInfo *adj_ff)
 {
-    return ff->type != adj_ff->type &&
-           ((ff->type == id_DFFS && adj_ff->type != id_DFFR) || (ff->type == id_DFFR && adj_ff->type != id_DFFS) ||
-            (ff->type == id_DFFSE && adj_ff->type != id_DFFRE) || (ff->type == id_DFFRE && adj_ff->type != id_DFFSE) ||
-            (ff->type == id_DFFP && adj_ff->type != id_DFFC) || (ff->type == id_DFFC && adj_ff->type != id_DFFP) ||
-            (ff->type == id_DFFPE && adj_ff->type != id_DFFCE) || (ff->type == id_DFFCE && adj_ff->type != id_DFFPE) ||
-            (ff->type == id_DFFNS && adj_ff->type != id_DFFNR) || (ff->type == id_DFFNR && adj_ff->type != id_DFFNS) ||
-            (ff->type == id_DFFNSE && adj_ff->type != id_DFFNRE) ||
-            (ff->type == id_DFFNRE && adj_ff->type != id_DFFNSE) ||
-            (ff->type == id_DFFNP && adj_ff->type != id_DFFNC) || (ff->type == id_DFFNC && adj_ff->type != id_DFFNP) ||
-            (ff->type == id_DFFNPE && adj_ff->type != id_DFFNCE) ||
-            (ff->type == id_DFFNCE && adj_ff->type != id_DFFNPE) || (ff->type == id_DFF && adj_ff->type != id_DFF) ||
-            (ff->type == id_DFFE && adj_ff->type != id_DFFE) || (ff->type == id_DFFN && adj_ff->type != id_DFFN) ||
-            (ff->type == id_DFFNE && adj_ff->type != id_DFFNE));
+    FfLsrKind a = ff_lsr_kind(ff->type);
+    FfLsrKind b = ff_lsr_kind(adj_ff->type);
+    if (a != LSR_NONE_KIND && b != LSR_NONE_KIND && a != b)
+        return true;
+    return false;
 }
 
 // placement validation

@@ -636,7 +636,14 @@ void GowinPacker::run(void)
     // Insert passthrough LUT4 (INIT=0xff00) for any DFF still unpaired.
     // This mirrors what Gowin EDA does (verified via gowin_unpack of a
     // reference bitstream: 1325+ buffer LUTs with INIT=0xff00).
-    insert_buffer_luts_for_orphan_dffs();
+    // Round 17: gate buffer-LUT trick behind env var GOWIN_BUFFER_LUTS=1.
+    // Default: OFF -> orphan FFs route via REG_SD path natively.
+    if (getenv("GOWIN_BUFFER_LUTS") != nullptr) {
+        log_info("GOWIN_BUFFER_LUTS=1: applying buffer-LUT trick.\n");
+        insert_buffer_luts_for_orphan_dffs();
+    } else {
+        log_info("GOWIN_BUFFER_LUTS not set: SKIPPING buffer-LUT trick.\n");
+    }
     ctx->check();
 
     // Phase 7 LSR canonicalize — MOVED to end of pack pipeline (Phase 7c)
@@ -684,6 +691,9 @@ void GowinPacker::run(void)
 
     ctx->fixupHierarchy();
     ctx->check();
+
+    // R23: dump FF control sets to CSV (gated on env var GOWIN_FF_CSV_DUMP)
+    dump_ff_control_sets();
 }
 
 void gowin_pack(Context *ctx)

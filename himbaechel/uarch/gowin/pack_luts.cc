@@ -982,6 +982,14 @@ void GowinPacker::insert_buffer_luts_for_orphan_dffs(void)
 
     log_info("Inserted %d buffer LUTs for orphan DFFs (%d already paired, %d no D source, %d skipped for budget).\n",
              buffered, already_paired, no_d_source, skipped_for_budget);
+
+    // Round 17: GOWIN_FAIL_ON_REG_SD env var. If set and any FFs were skipped
+    // (so they would fall back to REG_SD path), fail loudly. Used to isolate
+    // buffer-LUT-only test mode.
+    if (skipped_for_budget > 0 && getenv("GOWIN_FAIL_ON_REG_SD") != nullptr) {
+        log_error("GOWIN_FAIL_ON_REG_SD=1: %d orphan FFs would fall back to REG_SD path "
+                  "(LUT4 budget exceeded). Failing placement.\n", skipped_for_budget);
+    }
 }
 
 void GowinPacker::pack_ssram(void)
@@ -1221,5 +1229,106 @@ void GowinPacker::normalize_inactive_lsr_ports(void)
         }
     }
 }
+
+
+// ===================================
+// Round 23: dump every packed FF's control set to CSV.
+// Activated via env var GOWIN_FF_CSV_DUMP=<path>. Writes:
+//   cell,type,cluster,clk,ce,lsr_port,lsr_net,polarity,d_input,q_output
+// Used to diagnose LSR conflicts where multiple FFs in the same CLU
+// have incompatible control sets that the chip cannot encode.
+// ===================================
+void GowinPacker::dump_ff_control_sets(void)
+{
+    const char *path = getenv("GOWIN_FF_CSV_DUMP");
+    if (path == nullptr) {
+        return;
+    }
+    log_info("R23: GOWIN_FF_CSV_DUMP=%s -- dumping FF control sets.\n", path);
+
+    const pool<IdString> dff_types{
+        id_DFF, id_DFFE, id_DFFN, id_DFFNE,
+        id_DFFS, id_DFFSE, id_DFFNS, id_DFFNSE,
+        id_DFFR, id_DFFRE, id_DFFNR, id_DFFNRE,
+        id_DFFP, id_DFFPE, id_DFFNP, id_DFFNPE,
+        id_DFFC, id_DFFCE, id_DFFNC, id_DFFNCE
+    };
+
+    FILE *f = fopen(path, "w");
+    if (f == nullptr) {
+        log_warning("R23: cannot open %s for writing\n", path);
+        return;
+    }
+    fprintf(f, "cell,type,cluster,clk,ce,lsr_port,lsr_net,polarity,d_input,q_output\n");
+
+    auto net_name = [&](NetInfo *net) -> std::string {
+        if (net == nullptr) return "-";
+        std::string s = net->name.c_str(ctx);
+        // strip CSV-hostile chars
+        for (char &c : s) if (c == ',' || c == '\n' || c == '\r') c = '_';
+        return s;
+    };
+
+    auto cluster_name = [&](CellInfo *ci) -> std::string {
+        if (ci->cluster == ClusterId()) return "-";
+        // ClusterId in himbaechel = IdString-typed. Use ctx->getClusterRootCell().
+        CellInfo *root = ctx->getClusterRootCell(ci->cluster);
+        if (root == nullptr) return "-";
+        std::string s = root->name.c_str(ctx);
+        for (char &c : s) if (c == ',' || c == '\n' || c == '\r') c = '_';
+        return s;
+    };
+
+    int n = 0;
+    for (auto &cell : ctx->cells) {
+        CellInfo *ci = cell.second.get();
+        if (!dff_types.count(ci->type)) continue;
+
+        NetInfo *clk_net = ci->getPort(id_CLK);
+        NetInfo *ce_net = ci->getPort(id_CE);
+        NetInfo *d_net = ci->getPort(id_D);
+        NetInfo *q_net = ci->getPort(id_Q);
+
+        const char *lsr_port_str = "-";
+        NetInfo *lsr_net = nullptr;
+        const char *polarity = "none";
+
+        IdString t = ci->type;
+        if (t == id_DFFR || t == id_DFFRE || t == id_DFFNR || t == id_DFFNRE) {
+            lsr_port_str = "RESET"; polarity = "async";
+            lsr_net = ci->getPort(id_RESET);
+        } else if (t == id_DFFS || t == id_DFFSE || t == id_DFFNS || t == id_DFFNSE) {
+            lsr_port_str = "SET"; polarity = "async";
+            lsr_net = ci->getPort(id_SET);
+        } else if (t == id_DFFC || t == id_DFFCE || t == id_DFFNC || t == id_DFFNCE) {
+            lsr_port_str = "CLEAR"; polarity = "sync";
+            lsr_net = ci->getPort(id_CLEAR);
+        } else if (t == id_DFFP || t == id_DFFPE || t == id_DFFNP || t == id_DFFNPE) {
+            lsr_port_str = "PRESET"; polarity = "sync";
+            lsr_net = ci->getPort(id_PRESET);
+        }
+
+        std::string cell_n = ci->name.c_str(ctx);
+        for (char &c : cell_n) if (c == ',' || c == '\n' || c == '\r') c = '_';
+        std::string type_n = ci->type.c_str(ctx);
+
+        fprintf(f, "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n",
+            cell_n.c_str(),
+            type_n.c_str(),
+            cluster_name(ci).c_str(),
+            net_name(clk_net).c_str(),
+            net_name(ce_net).c_str(),
+            lsr_port_str,
+            net_name(lsr_net).c_str(),
+            polarity,
+            net_name(d_net).c_str(),
+            net_name(q_net).c_str());
+        n++;
+    }
+
+    fclose(f);
+    log_info("R23: wrote %d FF rows to %s\n", n, path);
+}
+
 
 NEXTPNR_NAMESPACE_END

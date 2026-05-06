@@ -114,6 +114,7 @@ struct GowinPacker
     void replicate_multi_fanout_lutffs(void);
     void insert_buffer_luts_for_orphan_dffs(void);
     void normalize_inactive_lsr_ports(void);
+    void dump_ff_control_sets(void);  // r23 LSR conflict instrumentation
     std::unique_ptr<CellInfo> ssram_make_lut(Context *ctx, CellInfo *ci, int index);
 
     // BSRAM
