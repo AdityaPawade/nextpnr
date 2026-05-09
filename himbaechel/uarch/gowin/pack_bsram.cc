@@ -11,6 +11,9 @@
 #include "pack.h"
 
 #include <cinttypes>
+#include <cstdlib>
+#include <cctype>
+#include <string>
 
 NEXTPNR_NAMESPACE_BEGIN
 
@@ -473,13 +476,54 @@ void GowinPacker::pack_DPB(CellInfo *ci, std::vector<std::unique_ptr<CellInfo>> 
     int bit_width = ci->params.at(id_BIT_WIDTH_0).as_int64();
     bsram_rename_ports(ci, bit_width, "DIA[%d]", "DIA%d");
 
-    if (bit_width < 16 && gwu.need_BSRAM_OUTREG_fix()) {
+    // Codex round 15 finding: GW5A-25A also needs the DP narrow-BSRAM CE/OCE
+    // fix (apicula chipdb sets need_BSRAM_DP_CE_fix only for GW1N-9C/GW2A-18C).
+    // Without this, narrow DP BSRAMs have OCE constant-high while CE pulses,
+    // and writes never capture into the cell. Symptom: 16-cell-replicated
+    // sector_buffer reads always return 0x00 (FDR walks every sector forever).
+    // Gated by env var GOWIN_FORCE_BSRAM_DP_CE_FIX=1 (off by default; backward
+    // compatible). Truthy values: anything other than 0 / false / no / off.
+    bool force_dp_ce_fix = false;
+    {
+        const char *e = getenv("GOWIN_FORCE_BSRAM_DP_CE_FIX");
+        if (e != nullptr && e[0] != 0) {
+            std::string v(e);
+            for (auto &c: v) c = (char)std::tolower((unsigned char)c);
+            force_dp_ce_fix = !(v == "0" || v == "false" || v == "no" || v == "off");
+        }
+    }
+    bool dp_ce_fix = gwu.need_BSRAM_DP_CE_fix() || force_dp_ce_fix;
+
+    // GOWIN_FORCE_BSRAM_OUTREG_FIX (Codex r18/r19 follow-up): force the
+    // OUTREG fix to fire even when chipdb's need_BSRAM_OUTREG_fix() returns
+    // false. With READ_MODE=1 in the cell, the fix externalizes the BSRAM
+    // internal output register into a discrete DFF outside the cell, then
+    // sets the cell back to bypass mode (READ_MODE=0). Useful when the
+    // BSRAM internal output register has chip-level bugs on GW5A narrow DP.
+    bool force_outreg_fix = false;
+    {
+        const char *e = getenv("GOWIN_FORCE_BSRAM_OUTREG_FIX");
+        if (e != nullptr && e[0] != 0) {
+            std::string v(e);
+            for (auto &c: v) c = (char)std::tolower((unsigned char)c);
+            force_outreg_fix = !(v == "0" || v == "false" || v == "no" || v == "off");
+        }
+    }
+    bool outreg_fix = gwu.need_BSRAM_OUTREG_fix() || force_outreg_fix;
+
+    if (bit_width < 16 && outreg_fix) {
+        if (force_outreg_fix && !gwu.need_BSRAM_OUTREG_fix())
+            log_info("  GOWIN_FORCE_BSRAM_OUTREG_FIX: forcing OUTREG fix on %s port A (bit_width=%d)\n",
+                     ci->name.c_str(ctx), bit_width);
         bsram_fix_outreg(ci, bit_width, id_CEA, id_OCEA, id_CLKA, id_RESETA, id_DOA, id_READ_MODE0, new_cells);
     }
     bsram_rename_ports(ci, bit_width, "DOA[%d]", "DOA%d");
     // In BYPASS mode, the OCE signal is dictated by CE.
-    if (gwu.need_BSRAM_DP_CE_fix()) {
+    if (dp_ce_fix) {
         if (bit_width <= 9) {
+            if (force_dp_ce_fix && !gwu.need_BSRAM_DP_CE_fix())
+                log_info("  GOWIN_FORCE_BSRAM_DP_CE_FIX: forcing DP CE/OCE fix on %s port A (bit_width=%d)\n",
+                         ci->name.c_str(ctx), bit_width);
             ci->disconnectPort(id_OCEA);
             ci->copyPortTo(id_CEA, ci, id_OCEA);
         }
@@ -490,14 +534,20 @@ void GowinPacker::pack_DPB(CellInfo *ci, std::vector<std::unique_ptr<CellInfo>> 
     bit_width = ci->params.at(id_BIT_WIDTH_1).as_int64();
     bsram_rename_ports(ci, bit_width, "DIB[%d]", "DIB%d");
 
-    if (bit_width < 16 && gwu.need_BSRAM_OUTREG_fix()) {
+    if (bit_width < 16 && outreg_fix) {
+        if (force_outreg_fix && !gwu.need_BSRAM_OUTREG_fix())
+            log_info("  GOWIN_FORCE_BSRAM_OUTREG_FIX: forcing OUTREG fix on %s port B (bit_width=%d)\n",
+                     ci->name.c_str(ctx), bit_width);
         bsram_fix_outreg(ci, bit_width, id_CEB, id_OCEB, id_CLKB, id_RESETB, id_DOB, id_READ_MODE1, new_cells);
     }
     bsram_rename_ports(ci, bit_width, "DOB[%d]", "DOB%d");
 
     // In BYPASS mode, the OCE signal is dictated by CE.
-    if (gwu.need_BSRAM_DP_CE_fix()) {
+    if (dp_ce_fix) {
         if (bit_width <= 9) {
+            if (force_dp_ce_fix && !gwu.need_BSRAM_DP_CE_fix())
+                log_info("  GOWIN_FORCE_BSRAM_DP_CE_FIX: forcing DP CE/OCE fix on %s port B (bit_width=%d)\n",
+                         ci->name.c_str(ctx), bit_width);
             ci->disconnectPort(id_OCEB);
             ci->copyPortTo(id_CEB, ci, id_OCEB);
         }

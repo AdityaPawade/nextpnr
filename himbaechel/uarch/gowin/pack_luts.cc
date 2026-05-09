@@ -11,6 +11,8 @@
 #include "pack.h"
 
 #include <cinttypes>
+#include <cstdlib>
+#include <cctype>
 
 NEXTPNR_NAMESPACE_BEGIN
 
@@ -903,7 +905,23 @@ void GowinPacker::insert_buffer_luts_for_orphan_dffs(void)
         }
         // MUX2_LUT5/6/7/8 children are LUT4-typed and counted above.
     }
-    const int HEADROOM = 500;
+    // HEADROOM defaults to 500 (placer flexibility reserve).  When tight LUT
+    // budget is needed (e.g. testing memory_fold_reads aggressive mode for
+    // large designs), override via env var GOWIN_HEADROOM.  Off-by-default,
+    // i.e. unset = 500, explicit value = override.  See yosys
+    // YOSYS_MEM_FOLD_AGGRESSIVE for the corresponding yosys-side flag.
+    int HEADROOM = 500;
+    const char *env_headroom = getenv("GOWIN_HEADROOM");
+    if (env_headroom != nullptr && env_headroom[0] != 0) {
+        int parsed = atoi(env_headroom);
+        if (parsed >= 0) {
+            HEADROOM = parsed;
+            log_info("GOWIN_HEADROOM=%s: overriding default placement-flexibility reserve from 500 to %d LUTs.\n",
+                     env_headroom, HEADROOM);
+        } else {
+            log_warning("GOWIN_HEADROOM=%s: invalid (negative); keeping default 500.\n", env_headroom);
+        }
+    }
     int max_buffers = total_lut_bels - existing_luts - HEADROOM;
     if (max_buffers < 0) max_buffers = 0;
     log_info("Buffer-LUT budget: %d LUT BELs total, %d existing LUTs, %d max buffers (HEADROOM=%d).\n",
@@ -983,12 +1001,26 @@ void GowinPacker::insert_buffer_luts_for_orphan_dffs(void)
     log_info("Inserted %d buffer LUTs for orphan DFFs (%d already paired, %d no D source, %d skipped for budget).\n",
              buffered, already_paired, no_d_source, skipped_for_budget);
 
-    // Round 17: GOWIN_FAIL_ON_REG_SD env var. If set and any FFs were skipped
-    // (so they would fall back to REG_SD path), fail loudly. Used to isolate
-    // buffer-LUT-only test mode.
-    if (skipped_for_budget > 0 && getenv("GOWIN_FAIL_ON_REG_SD") != nullptr) {
-        log_error("GOWIN_FAIL_ON_REG_SD=1: %d orphan FFs would fall back to REG_SD path "
-                  "(LUT4 budget exceeded). Failing placement.\n", skipped_for_budget);
+    // Round 17: GOWIN_FAIL_ON_REG_SD env var. If set to a truthy value AND any
+    // FFs were skipped (so they would fall back to REG_SD path), fail loudly.
+    // Used to isolate buffer-LUT-only test mode. Truthy = nonempty AND not "0"
+    // / "false" / "no" / "off" — so a caller can explicitly disable the check
+    // for diagnostic experiments via GOWIN_FAIL_ON_REG_SD=0.
+    if (skipped_for_budget > 0) {
+        const char *env_fail = getenv("GOWIN_FAIL_ON_REG_SD");
+        bool fail_on = false;
+        if (env_fail != nullptr && env_fail[0] != 0) {
+            std::string v(env_fail);
+            for (auto &c: v) c = (char)std::tolower((unsigned char)c);
+            fail_on = !(v == "0" || v == "false" || v == "no" || v == "off");
+        }
+        if (fail_on) {
+            log_error("GOWIN_FAIL_ON_REG_SD=%s: %d orphan FFs would fall back to REG_SD path "
+                      "(LUT4 budget exceeded). Failing placement.\n", env_fail, skipped_for_budget);
+        } else if (env_fail != nullptr && env_fail[0] != 0) {
+            log_warning("GOWIN_FAIL_ON_REG_SD=%s (disabled): %d orphan FFs will fall back to REG_SD path. "
+                        "Bitstream may not be functional on hardware.\n", env_fail, skipped_for_budget);
+        }
     }
 }
 
