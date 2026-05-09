@@ -13,6 +13,7 @@
 #include "pack.h"
 
 #include <cinttypes>
+#include <cstdlib>
 
 NEXTPNR_NAMESPACE_BEGIN
 
@@ -636,13 +637,22 @@ void GowinPacker::run(void)
     // Insert passthrough LUT4 (INIT=0xff00) for any DFF still unpaired.
     // This mirrors what Gowin EDA does (verified via gowin_unpack of a
     // reference bitstream: 1325+ buffer LUTs with INIT=0xff00).
-    // Round 17: gate buffer-LUT trick behind env var GOWIN_BUFFER_LUTS=1.
-    // Default: OFF -> orphan FFs route via REG_SD path natively.
-    if (getenv("GOWIN_BUFFER_LUTS") != nullptr) {
-        log_info("GOWIN_BUFFER_LUTS=1: applying buffer-LUT trick.\n");
+    // Round 17 / 2026-05-10: gate buffer-LUT trick behind env var GOWIN_BUFFER_LUTS.
+    // Default: ON -> orphan FFs use Gowin-style buffer LUTs (hardware-proven).
+    // Set GOWIN_BUFFER_LUTS=0 / false / no / off to allow legacy REG_SD routing
+    // (REG_SD path is NOT hardware-proven on GW5A-25A; EXP_KK + EXP_LL both DEAD).
+    const char *env_buffer_luts = getenv("GOWIN_BUFFER_LUTS");
+    bool buffer_luts = env_is_truthy(env_buffer_luts, /*default_when_unset=*/true);
+    if (buffer_luts) {
+        if (env_buffer_luts == nullptr)
+            log_info("[gowin] routing policy: buffer-LUT mode active (default; override with GOWIN_BUFFER_LUTS=0)\n");
+        else
+            log_info("[gowin] routing policy: buffer-LUT mode active (enabled by GOWIN_BUFFER_LUTS=%s)\n", env_buffer_luts);
         insert_buffer_luts_for_orphan_dffs();
     } else {
-        log_info("GOWIN_BUFFER_LUTS not set: SKIPPING buffer-LUT trick.\n");
+        const char *shown = (env_buffer_luts == nullptr || env_buffer_luts[0] == 0) ? "<empty>" : env_buffer_luts;
+        log_info("[gowin] routing policy: buffer-LUT mode disabled "
+                 "(override -> disabled by env GOWIN_BUFFER_LUTS=%s); REG_SD route allowed\n", shown);
     }
     ctx->check();
 

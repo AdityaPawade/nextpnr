@@ -3,9 +3,29 @@
 
 #include "nextpnr.h"
 
+#include <cctype>
+#include <string>
+
 NEXTPNR_NAMESPACE_BEGIN
 
 void gowin_pack(Context *ctx);
+
+// Parse env var as boolean. Returns default_when_unset if env var is null/unset.
+// Returns false if env var is empty, "0", "false", "no", or "off" (case-insensitive).
+// Returns true otherwise.
+// Used for GOWIN_BUFFER_LUTS and GOWIN_FAIL_ON_REG_SD policy gates.
+static inline bool env_is_truthy(const char *env_value, bool default_when_unset)
+{
+    if (env_value == nullptr)
+        return default_when_unset;
+    if (env_value[0] == 0)
+        return false;
+
+    std::string v(env_value);
+    for (auto &c : v)
+        c = (char)std::tolower((unsigned char)c);
+    return !(v == "0" || v == "false" || v == "no" || v == "off");
+}
 
 struct GowinPacker
 {

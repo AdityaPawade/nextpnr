@@ -1001,23 +1001,33 @@ void GowinPacker::insert_buffer_luts_for_orphan_dffs(void)
     log_info("Inserted %d buffer LUTs for orphan DFFs (%d already paired, %d no D source, %d skipped for budget).\n",
              buffered, already_paired, no_d_source, skipped_for_budget);
 
-    // Round 17: GOWIN_FAIL_ON_REG_SD env var. If set to a truthy value AND any
-    // FFs were skipped (so they would fall back to REG_SD path), fail loudly.
-    // Used to isolate buffer-LUT-only test mode. Truthy = nonempty AND not "0"
-    // / "false" / "no" / "off" — so a caller can explicitly disable the check
-    // for diagnostic experiments via GOWIN_FAIL_ON_REG_SD=0.
+    // Round 17 / 2026-05-10: GOWIN_FAIL_ON_REG_SD env var. Default ON.
+    // If truthy AND any FFs were skipped (so they would fall back to REG_SD
+    // path), fail loudly. Default ON because REG_SD is NOT hardware-proven on
+    // GW5A-25A (EXP_KK + EXP_LL both produced dead bitstreams). Set
+    // GOWIN_FAIL_ON_REG_SD=0 / false / no / off for diagnostic REG_SD experiments.
+    const char *env_fail = getenv("GOWIN_FAIL_ON_REG_SD");
+    bool fail_on = env_is_truthy(env_fail, /*default_when_unset=*/true);
+    if (fail_on) {
+        if (env_fail == nullptr)
+            log_info("[gowin] REG_SD fallback: FAIL (default; override with GOWIN_FAIL_ON_REG_SD=0)\n");
+        else
+            log_info("[gowin] REG_SD fallback: FAIL (enabled by GOWIN_FAIL_ON_REG_SD=%s)\n", env_fail);
+    } else {
+        const char *shown = (env_fail == nullptr || env_fail[0] == 0) ? "<empty>" : env_fail;
+        log_info("[gowin] REG_SD fallback: WARN only "
+                 "(override -> disabled by env GOWIN_FAIL_ON_REG_SD=%s)\n", shown);
+    }
+
     if (skipped_for_budget > 0) {
-        const char *env_fail = getenv("GOWIN_FAIL_ON_REG_SD");
-        bool fail_on = false;
-        if (env_fail != nullptr && env_fail[0] != 0) {
-            std::string v(env_fail);
-            for (auto &c: v) c = (char)std::tolower((unsigned char)c);
-            fail_on = !(v == "0" || v == "false" || v == "no" || v == "off");
-        }
         if (fail_on) {
-            log_error("GOWIN_FAIL_ON_REG_SD=%s: %d orphan FFs would fall back to REG_SD path "
-                      "(LUT4 budget exceeded). Failing placement.\n", env_fail, skipped_for_budget);
-        } else if (env_fail != nullptr && env_fail[0] != 0) {
+            if (env_fail == nullptr)
+                log_error("GOWIN_FAIL_ON_REG_SD default: %d orphan FFs would fall back to REG_SD path "
+                          "(LUT4 budget exceeded). Failing placement.\n", skipped_for_budget);
+            else
+                log_error("GOWIN_FAIL_ON_REG_SD=%s: %d orphan FFs would fall back to REG_SD path "
+                          "(LUT4 budget exceeded). Failing placement.\n", env_fail, skipped_for_budget);
+        } else {
             log_warning("GOWIN_FAIL_ON_REG_SD=%s (disabled): %d orphan FFs will fall back to REG_SD path. "
                         "Bitstream may not be functional on hardware.\n", env_fail, skipped_for_budget);
         }
