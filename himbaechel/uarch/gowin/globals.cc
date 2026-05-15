@@ -42,6 +42,20 @@ struct GowinGlobalRouter
 
     bool global_pip_available(PipId pip) const { return gwu.is_global_pip(pip) || ctx->checkPipAvail(pip); };
 
+    // R42 (Codex thread, 2026-05-14): block SPINE8 routing on GW5A-25A.
+    bool is_gw5a25a_spine8_pip(PipId pip) const
+    {
+        IdString chipdb_key = ctx->id("packer.chipdb");
+        if (!ctx->settings.count(chipdb_key))
+            return false;
+        std::string family = ctx->settings.at(chipdb_key).as_string();
+        if (family.rfind("GW5A-25", 0) != 0)
+            return false;
+        IdString src_name = ctx->getWireName(ctx->getPipSrcWire(pip))[1];
+        IdString dst_name = ctx->getWireName(ctx->getPipDstWire(pip))[1];
+        return src_name == id_SPINE8 || dst_name == id_SPINE8;
+    }
+
     bool segment_wire_filter(PipId pip) const { return !gwu.is_segment_pip(pip); }
 
     // To avoid a cycle where we connect the clock wire to the gate in
@@ -65,6 +79,10 @@ struct GowinGlobalRouter
     // allow io->global, global->global and global->tile clock
     bool global_pip_filter(PipId pip, WireId src_wire) const
     {
+        // R42: ban SPINE8 on GW5A-25A
+        if (is_gw5a25a_spine8_pip(pip)) {
+            return false;
+        }
         auto is_local = [&](IdString wire_type) {
             return !wire_type.in(id_GLOBAL_CLK, id_IO_O, id_IO_I, id_PLL_O, id_PLL_I, id_TILE_CLK);
         };
@@ -97,6 +115,10 @@ struct GowinGlobalRouter
 
     bool global_DQCE_pip_filter(PipId pip, WireId src_wire) const
     {
+        // R42: ban SPINE8 on GW5A-25A
+        if (is_gw5a25a_spine8_pip(pip)) {
+            return false;
+        }
         auto is_local = [&](IdString wire_type) {
             return !wire_type.in(id_GLOBAL_CLK, id_IO_O, id_IO_I, id_PLL_O, id_PLL_I, id_TILE_CLK);
         };
@@ -138,6 +160,10 @@ struct GowinGlobalRouter
 
     bool global_DCS_pip_filter(PipId pip, WireId src_wire) const
     {
+        // R42: ban SPINE8 on GW5A-25A
+        if (is_gw5a25a_spine8_pip(pip)) {
+            return false;
+        }
         auto is_local = [&](IdString wire_type) {
             return !wire_type.in(id_GLOBAL_CLK, id_IO_O, id_IO_I, id_PLL_O, id_PLL_I, id_TILE_CLK);
         };

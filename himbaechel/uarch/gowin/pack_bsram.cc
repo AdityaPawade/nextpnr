@@ -442,8 +442,52 @@ void GowinPacker::pack_SDPB(CellInfo *ci, std::vector<std::unique_ptr<CellInfo>>
     }
 
     // Port A
+    // 2026-05-15 R51 (Codex round 13 thread 019e2a96): GW5A physical SDP may
+    // require WREA to actually PULSE (not be constant VCC) for writes to fire.
+    // Yosys's logical SDPB has no WREA port; the packer historically tied it
+    // to VCC. If the chip needs a real pulse, this is the bug. Env-gated:
+    // GOWIN_BSRAM_WREA_FROM_CEA=1 -> wire WREA to the same net as CEA so it
+    // pulses with sb_wren. Default OFF (= upstream behavior).
     ci->addInput(id_WREA);
-    ci->connectPort(id_WREA, vcc_net);
+    {
+        const char *_wrea_env = getenv("GOWIN_BSRAM_WREA_FROM_CEA");
+        bool _wrea_from_cea = _wrea_env && _wrea_env[0] && std::string(_wrea_env) != "0";
+        if (_wrea_from_cea && ci->ports.count(id_CEA) && ci->ports[id_CEA].net != nullptr) {
+            ci->connectPort(id_WREA, ci->ports[id_CEA].net);
+            log_info("R51 WREA<-CEA on cell %s (net=%s)\n", ci->name.c_str(ctx), ci->ports[id_CEA].net->name.c_str(ctx));
+        } else {
+            ci->connectPort(id_WREA, vcc_net);
+        }
+    }
+
+    // 2026-05-15 R53 (Codex round 21 thread 019e2c25): CEA-net inverter to
+    // pair with apicula's R52 CEMUX_CEA=INV. R52 inverts the CE_A mux at the
+    // BSRAM tile (matching Gowin's working bitstream). But nextpnr still
+    // routes the NON-inverted CEA = write-enable; combined with the mux INV
+    // the BSRAM sees ~CEA -> disabled during the intended write window ->
+    // only address 0 ever written (HW-verified: addr0 reads correct, rest 0).
+    // Gowin drives an INVERTED enable so the hardware mux inversion cancels.
+    // Mirror that: invert the CEA net with a LUT4 (F = !I3, INIT=0x00ff).
+    // Gated by the SAME flag as R52 so they always apply together.
+    // 2026-05-15: now DEFAULT-ON (proven fix). Original upstream behavior
+    // (no CEA-net inverter) retained: export GOWIN_FORCE_BSRAM_SDP_CEA_INV=0
+    // (or false/off) to disable.
+    {
+        const char *_cea_inv = getenv("GOWIN_FORCE_BSRAM_SDP_CEA_INV");
+        std::string _cea_inv_s = _cea_inv ? std::string(_cea_inv) : std::string("1");
+        bool _cea_inv_on = _cea_inv_s != "0" && _cea_inv_s != "false" && _cea_inv_s != "off";
+        if (_cea_inv_on && ci->ports.count(id_CEA) && ci->ports.at(id_CEA).net != nullptr) {
+            auto cea_inv_cell = gwu.create_cell(gwu.create_aux_name(ci->name, 0, "_cea_inv_lut$"), id_LUT4);
+            CellInfo *cea_inv = cea_inv_cell.get();
+            cea_inv->addInput(id_I3);
+            ci->movePortTo(id_CEA, cea_inv, id_I3);
+            cea_inv->addOutput(id_F);
+            ci->connectPorts(id_CEA, cea_inv, id_F);
+            cea_inv->setParam(id_INIT, 0x00ff); // F = !I3 (I0..I2 don't-care)
+            new_cells.push_back(std::move(cea_inv_cell));
+            log_info("R53 CEA inverter inserted on cell %s\n", ci->name.c_str(ctx));
+        }
+    }
 
     // Port B
     ci->addInput(id_WREB);
