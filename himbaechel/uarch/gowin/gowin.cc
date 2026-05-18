@@ -1,5 +1,9 @@
+#include <algorithm>
+#include <cstdlib>
+#include <cstring>
 #include <map>
 #include <regex>
+#include <vector>
 
 #include "himbaechel_api.h"
 #include "himbaechel_helpers.h"
@@ -116,6 +120,8 @@ struct GowinImpl : HimbaechelAPI
     // to avoid routing conflicts and maximize utilization
     void place_constrained_hclk_cells();
     void place_5a_hclks(void);
+    void constrain_r56_fabric_dq_capture_ffs(void);
+    void log_r57_preplace_debug_ffs(void);
 
     // bel placement validation
     bool slice_valid(int x, int y, int z) const;
@@ -895,9 +901,42 @@ void GowinImpl::place_constrained_hclk_cells()
     }
 }
 
+static bool r57_env_enabled(const char *name)
+{
+    const char *value = getenv(name);
+    if (value == nullptr || value[0] == '\0')
+        return false;
+    return strcmp(value, "0") != 0 && strcmp(value, "false") != 0 && strcmp(value, "FALSE") != 0 &&
+           strcmp(value, "off") != 0 && strcmp(value, "OFF") != 0 && strcmp(value, "no") != 0 &&
+           strcmp(value, "NO") != 0;
+}
+
+static bool r57_env_disabled(const char *name)
+{
+    const char *value = getenv(name);
+    if (value == nullptr || value[0] == '\0')
+        return false;
+    return strcmp(value, "0") == 0 || strcmp(value, "false") == 0 || strcmp(value, "FALSE") == 0 ||
+           strcmp(value, "off") == 0 || strcmp(value, "OFF") == 0 || strcmp(value, "no") == 0 ||
+           strcmp(value, "NO") == 0;
+}
+
 void GowinImpl::prePlace()
 {
+    bool r57_debug = r57_env_enabled("R57_PREPLACE_DEBUG");
+    if (r57_debug) {
+        log_info("R57 prePlace hook ENTER\n");
+        log_r57_preplace_debug_ffs();
+        log_info("R57 prePlace: before place_constrained_hclk_cells()\n");
+    }
     place_constrained_hclk_cells();
+    if (r57_debug) {
+        log_info("R57 prePlace: after place_constrained_hclk_cells()\n");
+        log_info("R57 prePlace: before constrain_r56_fabric_dq_capture_ffs()\n");
+    }
+    constrain_r56_fabric_dq_capture_ffs();
+    if (r57_debug)
+        log_info("R57 prePlace: after constrain_r56_fabric_dq_capture_ffs()\n");
     ctx->assignArchInfo();
     assign_cell_info();
     fast_logic_cell.reset(ctx->getGridDimX(), ctx->getGridDimY());
@@ -906,6 +945,286 @@ void GowinImpl::prePlace()
             Loc loc = ctx->getBelLocation(bel);
             fast_logic_cell.at(loc.x, loc.y).resize(37);
         }
+    }
+}
+
+struct R56DqCaptureCandidate
+{
+    int hop;
+    int y_delta;
+    int x;
+    int z;
+    BelId bel;
+};
+
+static bool r56_tile_xy_in_grid(Context *ctx, int x, int y)
+{
+    return x >= 0 && y >= 0 && x < ctx->getGridDimX() && y < ctx->getGridDimY();
+}
+
+BelId find_r56_nearby_dq_capture_ff(Context *ctx, Loc iob_loc, const GowinImpl *impl, IdString ff_type,
+                                     bool r57_debug)
+{
+    std::vector<R56DqCaptureCandidate> candidates;
+    const int max_hop = 4;
+    const int grid_x = ctx->getGridDimX();
+    const int grid_y = ctx->getGridDimY();
+    if (grid_x <= 0 || grid_y <= 0) {
+        if (r57_debug)
+            log_info("R57 find_r56_nearby_dq_capture_ff: empty grid grid_x=%d grid_y=%d\n", grid_x, grid_y);
+        return BelId();
+    }
+    const int x0 = std::max(0, iob_loc.x - max_hop);
+    const int x1 = std::min(grid_x - 1, iob_loc.x + max_hop);
+    const int y0 = std::max(0, iob_loc.y - max_hop);
+    const int y1 = std::min(grid_y - 1, iob_loc.y + max_hop);
+    if (r57_debug) {
+        log_info("R57 find_r56_nearby_dq_capture_ff ENTER iob_loc=(%d,%d,%d) grid=(%d,%d) "
+                 "scan_x=[%d,%d] scan_y=[%d,%d]\n",
+                 iob_loc.x, iob_loc.y, iob_loc.z, grid_x, grid_y, x0, x1, y0, y1);
+    }
+    if (x0 > x1 || y0 > y1)
+        return BelId();
+    for (int y = y0; y <= y1; ++y) {
+        for (int x = x0; x <= x1; ++x) {
+            if (!r56_tile_xy_in_grid(ctx, x, y)) {
+                if (r57_debug)
+                    log_info("R57 find_r56_nearby_dq_capture_ff: skip out-of-grid tile x=%d y=%d\n", x, y);
+                continue;
+            }
+            int hop = std::abs(x - iob_loc.x) + std::abs(y - iob_loc.y);
+            if (hop > max_hop)
+                continue;
+            if (r57_debug)
+                log_info("R57 find_r56_nearby_dq_capture_ff: before getBelsByTile x=%d y=%d hop=%d\n", x, y,
+                         hop);
+            for (BelId bel : ctx->getBelsByTile(x, y)) {
+                if (r57_debug)
+                    log_info("R57 find_r56_nearby_dq_capture_ff: candidate raw_tile=%d raw_index=%d before "
+                             "getBelType\n",
+                             int(bel.tile), int(bel.index));
+                if (ctx->getBelType(bel) != id_DFF)
+                    continue;
+                if (r57_debug)
+                    log_info("R57 find_r56_nearby_dq_capture_ff: DFF candidate raw_tile=%d raw_index=%d before "
+                             "checkBelAvail\n",
+                             int(bel.tile), int(bel.index));
+                if (!ctx->checkBelAvail(bel))
+                    continue;
+                if (r57_debug)
+                    log_info("R57 find_r56_nearby_dq_capture_ff: DFF candidate raw_tile=%d raw_index=%d before "
+                             "isValidBelForCellType\n",
+                             int(bel.tile), int(bel.index));
+                if (!impl->isValidBelForCellType(ff_type, bel))
+                    continue;
+                if (r57_debug)
+                    log_info("R57 find_r56_nearby_dq_capture_ff: DFF candidate raw_tile=%d raw_index=%d before "
+                             "getBelLocation(candidate)\n",
+                             int(bel.tile), int(bel.index));
+                Loc loc = ctx->getBelLocation(bel);
+                if (r57_debug)
+                    log_info("R57 find_r56_nearby_dq_capture_ff: DFF candidate raw_tile=%d raw_index=%d "
+                             "loc=(%d,%d,%d)\n",
+                             int(bel.tile), int(bel.index), loc.x, loc.y, loc.z);
+                if (!r56_tile_xy_in_grid(ctx, loc.x, loc.y)) {
+                    if (r57_debug)
+                        log_info("R57 find_r56_nearby_dq_capture_ff: skip candidate outside grid loc=(%d,%d,%d)\n",
+                                 loc.x, loc.y, loc.z);
+                    continue;
+                }
+                candidates.push_back(R56DqCaptureCandidate{hop, std::abs(y - iob_loc.y), x, loc.z, bel});
+            }
+        }
+    }
+    if (candidates.empty())
+        return BelId();
+    std::sort(candidates.begin(), candidates.end(), [](const R56DqCaptureCandidate &a, const R56DqCaptureCandidate &b) {
+        if (a.hop != b.hop)
+            return a.hop < b.hop;
+        if (a.y_delta != b.y_delta)
+            return a.y_delta < b.y_delta;
+        if (a.x != b.x)
+            return a.x < b.x;
+        return a.z < b.z;
+    });
+    return candidates.front().bel;
+}
+
+static void r56_prepare_fast_logic_cell_for_preplace(Context *ctx,
+                                                     array2d<std::vector<CellInfo *>> &fast_logic_cell,
+                                                     bool r57_debug)
+{
+    int grid_x = ctx->getGridDimX();
+    int grid_y = ctx->getGridDimY();
+    if (fast_logic_cell.width() == grid_x && fast_logic_cell.height() == grid_y)
+        return;
+    if (r57_debug)
+        log_info("R57 constrain_r56_fabric_dq_capture_ffs: reset fast_logic_cell for early bind grid=(%d,%d)\n",
+                 grid_x, grid_y);
+    fast_logic_cell.reset(grid_x, grid_y);
+    for (BelId bel : ctx->getBels()) {
+        if (ctx->getBelType(bel) != id_LUT4)
+            continue;
+        Loc loc = ctx->getBelLocation(bel);
+        if (!r56_tile_xy_in_grid(ctx, loc.x, loc.y)) {
+            if (r57_debug)
+                log_info("R57 constrain_r56_fabric_dq_capture_ffs: skip LUT4 outside grid raw_tile=%d raw_index=%d "
+                         "loc=(%d,%d,%d)\n",
+                         int(bel.tile), int(bel.index), loc.x, loc.y, loc.z);
+            continue;
+        }
+        fast_logic_cell.at(loc.x, loc.y).resize(37);
+    }
+}
+
+static bool r56_bel_is_listed(Context *ctx, BelId needle)
+{
+    if (needle == BelId())
+        return false;
+    for (BelId bel : ctx->getBels())
+        if (bel == needle)
+            return true;
+    return false;
+}
+
+void GowinImpl::log_r57_preplace_debug_ffs(void)
+{
+    IdString capture_attr = ctx->id("R56_FABRIC_DQ_CAPTURE");
+    IdString iob_attr = ctx->id("R56_DQ_IOB_CELL");
+    std::map<std::string, CellInfo *> cells_by_name;
+    for (auto &cell : ctx->cells) {
+        cells_by_name[cell.second->name.str(ctx)] = cell.second.get();
+    }
+
+    for (auto &cell : ctx->cells) {
+        CellInfo *ff = cell.second.get();
+        if (!ff->attrs.count(capture_attr))
+            continue;
+        std::string iob_name = ff->attrs.count(iob_attr) ? ff->attrs.at(iob_attr).as_string() : std::string("<missing>");
+        auto iob_it = cells_by_name.find(iob_name);
+        CellInfo *iob = (iob_it == cells_by_name.end()) ? nullptr : iob_it->second;
+        bool iob_bel_is_null = (iob == nullptr) || (iob->bel == BelId());
+        int raw_tile = (iob == nullptr) ? -1 : int(iob->bel.tile);
+        int raw_index = (iob == nullptr) ? -1 : int(iob->bel.index);
+        log_info("R57 prePlace tagged FF %s owner_iob=%s owner_found=%d iob_bel_is_BelId=%d "
+                 "iob_bel_raw_tile=%d iob_bel_raw_index=%d\n",
+                 ctx->nameOf(ff), iob_name.c_str(), iob != nullptr, iob_bel_is_null, raw_tile, raw_index);
+    }
+}
+
+void GowinImpl::constrain_r56_fabric_dq_capture_ffs(void)
+{
+    bool place_constrain = !r57_env_disabled("R56_PLACE_CONSTRAIN");
+    bool r57_debug = r57_env_enabled("R57_PREPLACE_DEBUG");
+    if (!place_constrain && !r57_debug)
+        return;
+    if (r57_debug)
+        log_info("R57 constrain_r56_fabric_dq_capture_ffs: R56_PLACE_CONSTRAIN=%d\n", place_constrain);
+
+    IdString capture_attr = ctx->id("R56_FABRIC_DQ_CAPTURE");
+    IdString iob_attr = ctx->id("R56_DQ_IOB_CELL");
+    std::map<std::string, CellInfo *> cells_by_name;
+    for (auto &cell : ctx->cells) {
+        cells_by_name[cell.second->name.str(ctx)] = cell.second.get();
+    }
+
+    for (auto &cell : ctx->cells) {
+        CellInfo *ff = cell.second.get();
+        if (!ff->attrs.count(capture_attr))
+            continue;
+        if (!is_dff(ff)) {
+            log_warning("r56: tagged DQ capture cell %s is no longer a fabric DFF; skipping placement constraint.\n",
+                        ctx->nameOf(ff));
+            continue;
+        }
+        if (ff->bel != BelId()) {
+            if (ctx->verbose)
+                log_info("r56: tagged DQ capture FF %s is already placed; skipping placement constraint.\n",
+                         ctx->nameOf(ff));
+            continue;
+        }
+        if (!ff->attrs.count(iob_attr)) {
+            log_warning("r56: tagged DQ capture FF %s has no owning IOB attribute; skipping placement constraint.\n",
+                        ctx->nameOf(ff));
+            continue;
+        }
+        std::string iob_name = ff->attrs.at(iob_attr).as_string();
+        auto iob_it = cells_by_name.find(iob_name);
+        if (iob_it == cells_by_name.end()) {
+            log_warning("r56: tagged DQ capture FF %s references missing IOB %s; skipping placement constraint.\n",
+                        ctx->nameOf(ff), iob_name.c_str());
+            continue;
+        }
+        CellInfo *iob = iob_it->second;
+        if (iob->bel == BelId()) {
+            log_warning("r56: tagged DQ capture FF %s owner %s has no BEL in prePlace; skipping placement constraint.\n",
+                        ctx->nameOf(ff), ctx->nameOf(iob));
+            continue;
+        }
+        if (!place_constrain) {
+            if (r57_debug)
+                log_info("R57: R56_PLACE_CONSTRAIN is off; not constraining tagged DQ capture FF %s.\n",
+                         ctx->nameOf(ff));
+            continue;
+        }
+        if (!r56_bel_is_listed(ctx, iob->bel)) {
+            log_warning("r56: tagged DQ capture FF %s owner %s has a non-null BEL that is not in ctx->getBels(); "
+                        "skipping placement constraint.\n",
+                        ctx->nameOf(ff), ctx->nameOf(iob));
+            continue;
+        }
+
+        if (r57_debug)
+            log_info("R57 constrain_r56_fabric_dq_capture_ffs: FF %s owner %s before getBelLocation(iob->bel) "
+                     "raw_tile=%d raw_index=%d\n",
+                     ctx->nameOf(ff), ctx->nameOf(iob), int(iob->bel.tile), int(iob->bel.index));
+        Loc iob_loc = ctx->getBelLocation(iob->bel);
+        if (r57_debug)
+            log_info("R57 constrain_r56_fabric_dq_capture_ffs: FF %s owner %s iob_loc=(%d,%d,%d)\n",
+                     ctx->nameOf(ff), ctx->nameOf(iob), iob_loc.x, iob_loc.y, iob_loc.z);
+        if (!r56_tile_xy_in_grid(ctx, iob_loc.x, iob_loc.y)) {
+            log_warning("r56: tagged DQ capture FF %s owner %s has out-of-grid BEL location (%d,%d,%d); "
+                        "skipping placement constraint.\n",
+                        ctx->nameOf(ff), ctx->nameOf(iob), iob_loc.x, iob_loc.y, iob_loc.z);
+            continue;
+        }
+
+        r56_prepare_fast_logic_cell_for_preplace(ctx, fast_logic_cell, r57_debug);
+        if (r57_debug)
+            log_info("R57 constrain_r56_fabric_dq_capture_ffs: before find_r56_nearby_dq_capture_ff for FF %s "
+                     "iob_loc=(%d,%d,%d)\n",
+                     ctx->nameOf(ff), iob_loc.x, iob_loc.y, iob_loc.z);
+        BelId bel = find_r56_nearby_dq_capture_ff(ctx, iob_loc, this, ff->type, r57_debug);
+        if (bel == BelId()) {
+            log_warning("r56: unable to find a nearby fabric DFF BEL for DQ capture FF %s at %s; "
+                        "leaving it to the normal placer.\n",
+                        ctx->nameOf(ff), ctx->nameOf(iob));
+            continue;
+        }
+
+        if (r57_debug)
+            log_info("R57 constrain_r56_fabric_dq_capture_ffs: selected raw_tile=%d raw_index=%d before "
+                     "getBelLocation(selected)\n",
+                     int(bel.tile), int(bel.index));
+        Loc ff_loc = ctx->getBelLocation(bel);
+        if (!r56_tile_xy_in_grid(ctx, ff_loc.x, ff_loc.y)) {
+            log_warning("r56: selected DQ capture BEL for %s has out-of-grid location (%d,%d,%d); "
+                        "leaving it to the normal placer.\n",
+                        ctx->nameOf(ff), ff_loc.x, ff_loc.y, ff_loc.z);
+            continue;
+        }
+        if (int(fast_logic_cell.at(ff_loc.x, ff_loc.y).size()) <= ff_loc.z)
+            fast_logic_cell.at(ff_loc.x, ff_loc.y).resize(std::max(37, ff_loc.z + 1));
+        int hop = std::abs(ff_loc.x - iob_loc.x) + std::abs(ff_loc.y - iob_loc.y);
+        if (r57_debug)
+            log_info("R57 constrain_r56_fabric_dq_capture_ffs: before bindBel raw_tile=%d raw_index=%d "
+                     "ff_loc=(%d,%d,%d) hop=%d\n",
+                     int(bel.tile), int(bel.index), ff_loc.x, ff_loc.y, ff_loc.z, hop);
+        ctx->bindBel(bel, ff, PlaceStrength::STRENGTH_LOCKED);
+        ff->setAttr(ctx->id("R56_DQ_IOB_BEL"), Property(ctx->getBelName(iob->bel).str(ctx)));
+        ff->setAttr(ctx->id("R56_PAD_TO_FF_TILE_HOPS"), hop);
+        log_info("  r56: locked DQ capture FF %s at %s near IOB %s (tile_hops=%d)\n", ctx->nameOf(ff),
+                 ctx->nameOfBel(bel), ctx->nameOfBel(iob->bel), hop);
     }
 }
 

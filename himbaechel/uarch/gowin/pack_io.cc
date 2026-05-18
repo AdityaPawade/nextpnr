@@ -10,7 +10,10 @@
 #include "gowin_utils.h"
 #include "pack.h"
 
+#include <algorithm>
 #include <cinttypes>
+#include <cstdlib>
+#include <vector>
 
 NEXTPNR_NAMESPACE_BEGIN
 
@@ -546,6 +549,37 @@ void GowinPacker::pack_diff_iobs(void)
 
 static bool is_ff(const Context *ctx, CellInfo *cell) { return is_dff(cell); }
 
+static bool is_gw5a25a(const Context *ctx)
+{
+    IdString chipdb_key = ctx->id("packer.chipdb");
+    if (!ctx->settings.count(chipdb_key))
+        return false;
+    std::string family = ctx->settings.at(chipdb_key).as_string();
+    return family.rfind("GW5A-25", 0) == 0;
+}
+
+static bool is_sdram_dq_iobuf(const Context *ctx, const CellInfo &ci)
+{
+    if (ci.type != id_IOBUF)
+        return false;
+    std::string name = ci.name.str(ctx);
+    if (name.find("gen_sdram_dq_iob[") != std::string::npos &&
+        name.find(".u_sdram_dq_iobuf") != std::string::npos)
+        return true;
+    return name.find("$iopadmap$") != std::string::npos &&
+           name.find(".IO_sdram_dq[") != std::string::npos;
+}
+
+static bool is_r56_fabric_dq_iobuf(const Context *ctx, const CellInfo &ci)
+{
+    if (!is_gw5a25a(ctx) || ci.type != id_IOBUF)
+        return false;
+    std::string name = ci.name.str(ctx);
+    return is_sdram_dq_iobuf(ctx, ci) ||
+           (name.find("gen_bidir_iob[") != std::string::npos &&
+            name.find(".u_bidir_iobuf") != std::string::npos);
+}
+
 static bool incompatible_ffs(IdString type_a, IdString type_b)
 {
     return type_a != type_b &&
@@ -590,8 +624,24 @@ void GowinPacker::pack_io_regs(void)
 
         // input reg in IO
         CellInfo *iologic_i = nullptr;
-        if ((ci.type == id_IBUF && (ctx->settings.count(id_IREG_IN_IOB) || ci.attrs.count(id_IOBFF))) ||
-            (ci.type == id_IOBUF && (ctx->settings.count(id_IOREG_IN_IOB) || ci.attrs.count(id_IOBFF)))) {
+        bool r56_keep_fabric_dq_input = false;
+        if (is_r56_fabric_dq_iobuf(ctx, ci) && ci.getPort(id_O) != nullptr) {
+            CellInfo *ff = net_only_drives(ctx, ci.ports.at(id_O).net, is_ff, id_D);
+            if (ff != nullptr && ci.ports.at(id_O).net->users.entries() == 1) {
+                ff->setAttr(ctx->id("R56_FABRIC_DQ_CAPTURE"), 1);
+                ff->setAttr(ctx->id("R56_DQ_IOB_CELL"), Property(ci.name.str(ctx)));
+                r56_keep_fabric_dq_input = true;
+                log_info("  r56: keep DQ input FF %s for %s in fabric; placement will lock it near the IOB.\n",
+                         ctx->nameOf(ff), ctx->nameOf(&ci));
+            } else if (ci.attrs.count(id_IOBFF)) {
+                log_warning("r56: DQ input fabric capture requested at %s, but no single fabric FF is driven by O.\n",
+                            ctx->nameOf(&ci));
+            }
+        }
+
+        if (!r56_keep_fabric_dq_input &&
+            ((ci.type == id_IBUF && (ctx->settings.count(id_IREG_IN_IOB) || ci.attrs.count(id_IOBFF))) ||
+             (ci.type == id_IOBUF && (ctx->settings.count(id_IOREG_IN_IOB) || ci.attrs.count(id_IOBFF))))) {
 
             if (ci.getPort(id_O) == nullptr) {
                 continue;
@@ -685,41 +735,14 @@ void GowinPacker::pack_io_regs(void)
                             break;
                         }
                     }
-                    // The IOBUF may already have registers placed
+                    // The IOBUF may already have registers placed.  The input
+                    // and output registers live in separate IOLOGIC halves, so
+                    // they do not share the slice FF type/control-set
+                    // restrictions modelled by incompatible_ffs().
                     if (ci.type == id_IOBUF) {
                         if (iologic_i != nullptr) {
-                            if (incompatible_ffs(ff->type, reg_type)) {
-                                if (ci.attrs.count(id_IOBFF)) {
-                                    log_warning("OREG type conflict:%s:%s vs %s IREG:%s\n", ctx->nameOf(ff),
-                                                ff->type.c_str(ctx), ctx->nameOf(&ci), reg_type.c_str(ctx));
-                                }
-                                break;
-                            } else {
-                                if (clk_net != this_clk_net || ce_net != this_ce_net || lsr_net != this_lsr_net) {
-                                    if (clk_net != this_clk_net) {
-                                        if (ci.attrs.count(id_IOBFF)) {
-                                            log_warning("Conflicting OREG CLK nets at %s:'%s' vs '%s'\n",
-                                                        ctx->nameOf(&ci), ctx->nameOf(clk_net),
-                                                        ctx->nameOf(this_clk_net));
-                                        }
-                                    }
-                                    if (ce_net != this_ce_net) {
-                                        if (ci.attrs.count(id_IOBFF)) {
-                                            log_warning("Conflicting OREG CE nets at %s:'%s' vs '%s'\n",
-                                                        ctx->nameOf(&ci), ctx->nameOf(ce_net),
-                                                        ctx->nameOf(this_ce_net));
-                                        }
-                                    }
-                                    if (lsr_net != this_lsr_net) {
-                                        if (ci.attrs.count(id_IOBFF)) {
-                                            log_warning("Conflicting OREG LSR nets at %s:'%s' vs '%s'\n",
-                                                        ctx->nameOf(&ci), ctx->nameOf(lsr_net),
-                                                        ctx->nameOf(this_lsr_net));
-                                        }
-                                    }
-                                    break;
-                                }
-                            }
+                            // No compatibility check here: IREG and OREG are
+                            // independent hardware paths on a bidirectional IO.
                         } else {
                             clk_net = this_clk_net;
                             ce_net = this_ce_net;
