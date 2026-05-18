@@ -122,6 +122,8 @@ struct GowinImpl : HimbaechelAPI
     bool dsp_valid(Loc l, IdString bel_type, bool explain_invalid) const;
     bool hclk_valid(BelId bel, IdString bel_type) const;
 
+    void prepare_fast_logic_cell();
+
     array2d<std::vector<CellInfo *>> fast_logic_cell;
 
     delay_t delay_m, delay_c;
@@ -909,6 +911,20 @@ void GowinImpl::prePlace()
     }
 }
 
+void GowinImpl::prepare_fast_logic_cell()
+{
+    if (fast_logic_cell.width() == ctx->getGridDimX() && fast_logic_cell.height() == ctx->getGridDimY())
+        return;
+
+    fast_logic_cell.reset(ctx->getGridDimX(), ctx->getGridDimY());
+    for (auto bel : ctx->getBels()) {
+        if (ctx->getBelType(bel) == id_LUT4) {
+            Loc loc = ctx->getBelLocation(bel);
+            fast_logic_cell.at(loc.x, loc.y).resize(37);
+        }
+    }
+}
+
 void GowinImpl::postPlace()
 {
     log_info("[Codex round 12] SEL[i] rejection count during placement: %llu\n",
@@ -1634,6 +1650,8 @@ void GowinImpl::notifyBelChange(BelId bel, CellInfo *cell)
     case ID_MUX2_LUT7:
     case ID_MUX2_LUT8:
         auto loc = ctx->getBelLocation(bel);
+        if (fast_logic_cell.width() != ctx->getGridDimX() || fast_logic_cell.height() != ctx->getGridDimY())
+            prepare_fast_logic_cell();
         fast_logic_cell.at(loc.x, loc.y).at(loc.z) = cell;
         return;
     }
