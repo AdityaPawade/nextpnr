@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cinttypes>
 #include <cstdlib>
+#include <cstring>
 #include <vector>
 
 NEXTPNR_NAMESPACE_BEGIN
@@ -558,6 +559,16 @@ static bool is_gw5a25a(const Context *ctx)
     return family.rfind("GW5A-25", 0) == 0;
 }
 
+static bool r56_env_enabled(const char *name)
+{
+    const char *value = getenv(name);
+    if (value == nullptr || value[0] == '\0')
+        return false;
+    return strcmp(value, "0") != 0 && strcmp(value, "false") != 0 && strcmp(value, "FALSE") != 0 &&
+           strcmp(value, "off") != 0 && strcmp(value, "OFF") != 0 && strcmp(value, "no") != 0 &&
+           strcmp(value, "NO") != 0;
+}
+
 static bool is_sdram_dq_iobuf(const Context *ctx, const CellInfo &ci)
 {
     if (ci.type != id_IOBUF)
@@ -572,6 +583,8 @@ static bool is_sdram_dq_iobuf(const Context *ctx, const CellInfo &ci)
 
 static bool is_r56_fabric_dq_iobuf(const Context *ctx, const CellInfo &ci)
 {
+    if (!r56_env_enabled("R56_DQ_PATHB"))
+        return false;
     if (!is_gw5a25a(ctx) || ci.type != id_IOBUF)
         return false;
     std::string name = ci.name.str(ctx);
