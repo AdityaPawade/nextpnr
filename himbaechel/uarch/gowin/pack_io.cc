@@ -638,6 +638,48 @@ void GowinPacker::pack_io_regs(void)
         // input reg in IO
         CellInfo *iologic_i = nullptr;
         bool r56_keep_fabric_dq_input = false;
+
+        // R76G: env-gated synthetic multi-sink. Root cause (this session,
+        // multi-artifact + Codex-corroborated): for a SINGLE-fanout
+        // SDRAM-DQ IOBUF.O, nextpnr deterministically routes the capture
+        // FF clock from the IOB-column GBxx global branch (apicula .fs:
+        // DQ-tile CLK0=GBxx) at a wrong effective phase -> deterministic
+        // RD=F000 (seed-invariant). The ONLY structure proven to PASS on
+        // HW is the MULTI-fanout IOBUF.O of r70P (.fs CLK0=VCC, main
+        // spine). Placement levers (r75 lock-off, r76F v1 leave-to-placer,
+        // v3 force-far) ALL still produced CLK0=GBxx -> placement is not
+        // the lever; net fanout is. So when R56_DQ_FABRIC_AWAY is enabled
+        // we add a kept 2nd sink (LUT4 buffer) on the single-fanout DQ
+        // IOBUF.O net, exactly reproducing the proven-good r70P Heisenbug
+        // at the netlist level: the net becomes multi-fanout, the
+        // users.entries()==1 R56-tag/near-IOB path below is NOT taken
+        // (same as r70P), and the router clocks the capture FF off the
+        // main spine. Env-gated, default OFF: r35/EXP_HH has
+        // R56_DQ_PATHB=0 (is_r56_fabric_dq_iobuf == false) AND never sets
+        // this var -> bitstream byte-identical (md5 29359f54) two ways.
+        if (r56_env_enabled("R56_DQ_FABRIC_AWAY") && is_r56_fabric_dq_iobuf(ctx, ci) &&
+            ci.getPort(id_O) != nullptr) {
+            NetInfo *o_net = ci.ports.at(id_O).net;
+            if (o_net != nullptr && o_net->users.entries() == 1 &&
+                net_only_drives(ctx, o_net, is_ff, id_D) != nullptr) {
+                IdString sink_name = gwu.create_aux_name(ci.name, 0, "_r76g_msink$");
+                new_cells.push_back(gwu.create_cell(sink_name, id_LUT4));
+                CellInfo *msink = new_cells.back().get();
+                msink->addInput(id_I0);
+                msink->addOutput(id_F);
+                msink->setParam(id_INIT, Property(0xAAAA, 16)); // F = I0 (buffer)
+                msink->setAttr(ctx->id("keep"), 1);
+                IdString keep_net_name = gwu.create_aux_name(ci.name, 0, "_r76g_keep$");
+                NetInfo *keep_net = ctx->createNet(keep_net_name);
+                msink->connectPort(id_I0, o_net);   // 2nd user -> multi-fanout
+                msink->connectPort(id_F, keep_net);
+                log_info("  r76g: synthetic multi-sink LUT on %s O-net (mirror proven-good "
+                         "r70P; single-fanout -> multi-fanout so DQ capture clock uses the "
+                         "main spine, not the near-IOB GBxx branch).\n",
+                         ctx->nameOf(&ci));
+            }
+        }
+
         if (is_r56_fabric_dq_iobuf(ctx, ci) && ci.getPort(id_O) != nullptr) {
             CellInfo *ff = net_only_drives(ctx, ci.ports.at(id_O).net, is_ff, id_D);
             if (ff != nullptr && ci.ports.at(id_O).net->users.entries() == 1) {
