@@ -596,8 +596,19 @@ static bool is_sdram_dq_iobuf(const Context *ctx, const CellInfo &ci)
 
 static bool is_r56_fabric_dq_iobuf(const Context *ctx, const CellInfo &ci)
 {
-    if (!r56_env_enabled("R56_DQ_PATHB"))
-        return false;
+    // R56 "Path-B" (suppress the unrealizable GW5A pad-IOLOGIC input
+    // register, keep the SDRAM-DQ capture FF in fabric; r76G then forces
+    // it onto the main clock spine) is the ONLY proven-correct SDRAM-DQ
+    // read realization on the OSS GW5A-25A toolchain — the r46 fingerprint
+    // proved the pad-IOLOGIC alternative is a dead end (apicula cannot
+    // synthesize the full registered-EMPTY-IOLOGIC fuse set). The old
+    // R56_DQ_PATHB env selector split the test harness (=1, where the fix
+    // was proven) from the product EXP_HH (=0, where the fix never ran).
+    // Collapsed 2026-05-20 (user-authorized): Path-B is now UNCONDITIONAL
+    // for any GW5A-25A SDRAM-DQ IOBUF, so the minimal harness and the
+    // EXP_HH loader build the IDENTICAL proven path. (Intentionally
+    // changes the EXP_HH/r35 bitstream off the legacy buffer-LUT md5
+    // 29359f54 onto the proven Path-B — pending HW re-validation.)
     if (!is_gw5a25a(ctx) || ci.type != id_IOBUF)
         return false;
     std::string name = ci.name.str(ctx);
