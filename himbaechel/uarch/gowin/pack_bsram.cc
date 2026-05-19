@@ -441,24 +441,11 @@ void GowinPacker::pack_SDPB(CellInfo *ci, std::vector<std::unique_ptr<CellInfo>>
         ci->renamePort(id_RESET, id_RESETB);
     }
 
-    // Port A
-    // 2026-05-15 R51 (Codex round 13 thread 019e2a96): GW5A physical SDP may
-    // require WREA to actually PULSE (not be constant VCC) for writes to fire.
-    // Yosys's logical SDPB has no WREA port; the packer historically tied it
-    // to VCC. If the chip needs a real pulse, this is the bug. Env-gated:
-    // GOWIN_BSRAM_WREA_FROM_CEA=1 -> wire WREA to the same net as CEA so it
-    // pulses with sb_wren. Default OFF (= upstream behavior).
+    // Port A: WREA tied to VCC (upstream/default behavior; the
+    // GOWIN_BSRAM_WREA_FROM_CEA experiment probe was an unproven
+    // hypothesis, never default, removed in the 2026-05-19 cleanup).
     ci->addInput(id_WREA);
-    {
-        const char *_wrea_env = getenv("GOWIN_BSRAM_WREA_FROM_CEA");
-        bool _wrea_from_cea = _wrea_env && _wrea_env[0] && std::string(_wrea_env) != "0";
-        if (_wrea_from_cea && ci->ports.count(id_CEA) && ci->ports[id_CEA].net != nullptr) {
-            ci->connectPort(id_WREA, ci->ports[id_CEA].net);
-            log_info("R51 WREA<-CEA on cell %s (net=%s)\n", ci->name.c_str(ctx), ci->ports[id_CEA].net->name.c_str(ctx));
-        } else {
-            ci->connectPort(id_WREA, vcc_net);
-        }
-    }
+    ci->connectPort(id_WREA, vcc_net);
 
     // 2026-05-15 R53 (Codex round 21 thread 019e2c25): CEA-net inverter to
     // pair with apicula's R52 CEMUX_CEA=INV. R52 inverts the CE_A mux at the
@@ -520,54 +507,21 @@ void GowinPacker::pack_DPB(CellInfo *ci, std::vector<std::unique_ptr<CellInfo>> 
     int bit_width = ci->params.at(id_BIT_WIDTH_0).as_int64();
     bsram_rename_ports(ci, bit_width, "DIA[%d]", "DIA%d");
 
-    // Codex round 15 finding: GW5A-25A also needs the DP narrow-BSRAM CE/OCE
-    // fix (apicula chipdb sets need_BSRAM_DP_CE_fix only for GW1N-9C/GW2A-18C).
-    // Without this, narrow DP BSRAMs have OCE constant-high while CE pulses,
-    // and writes never capture into the cell. Symptom: 16-cell-replicated
-    // sector_buffer reads always return 0x00 (FDR walks every sector forever).
-    // Gated by env var GOWIN_FORCE_BSRAM_DP_CE_FIX=1 (off by default; backward
-    // compatible). Truthy values: anything other than 0 / false / no / off.
-    bool force_dp_ce_fix = false;
-    {
-        const char *e = getenv("GOWIN_FORCE_BSRAM_DP_CE_FIX");
-        if (e != nullptr && e[0] != 0) {
-            std::string v(e);
-            for (auto &c: v) c = (char)std::tolower((unsigned char)c);
-            force_dp_ce_fix = !(v == "0" || v == "false" || v == "no" || v == "off");
-        }
-    }
-    bool dp_ce_fix = gwu.need_BSRAM_DP_CE_fix() || force_dp_ce_fix;
-
-    // GOWIN_FORCE_BSRAM_OUTREG_FIX (Codex r18/r19 follow-up): force the
-    // OUTREG fix to fire even when chipdb's need_BSRAM_OUTREG_fix() returns
-    // false. With READ_MODE=1 in the cell, the fix externalizes the BSRAM
-    // internal output register into a discrete DFF outside the cell, then
-    // sets the cell back to bypass mode (READ_MODE=0). Useful when the
-    // BSRAM internal output register has chip-level bugs on GW5A narrow DP.
-    bool force_outreg_fix = false;
-    {
-        const char *e = getenv("GOWIN_FORCE_BSRAM_OUTREG_FIX");
-        if (e != nullptr && e[0] != 0) {
-            std::string v(e);
-            for (auto &c: v) c = (char)std::tolower((unsigned char)c);
-            force_outreg_fix = !(v == "0" || v == "false" || v == "no" || v == "off");
-        }
-    }
-    bool outreg_fix = gwu.need_BSRAM_OUTREG_fix() || force_outreg_fix;
+    // DP narrow-BSRAM CE/OCE fix and OUTREG fix are chipdb-driven
+    // (need_BSRAM_DP_CE_fix / need_BSRAM_OUTREG_fix). The
+    // GOWIN_FORCE_BSRAM_DP_CE_FIX / GOWIN_FORCE_BSRAM_OUTREG_FIX env
+    // overrides were PE00R00D200-era experiment probes (never default,
+    // unused by any shipping build); removed in the 2026-05-19 cleanup.
+    bool dp_ce_fix = gwu.need_BSRAM_DP_CE_fix();
+    bool outreg_fix = gwu.need_BSRAM_OUTREG_fix();
 
     if (bit_width < 16 && outreg_fix) {
-        if (force_outreg_fix && !gwu.need_BSRAM_OUTREG_fix())
-            log_info("  GOWIN_FORCE_BSRAM_OUTREG_FIX: forcing OUTREG fix on %s port A (bit_width=%d)\n",
-                     ci->name.c_str(ctx), bit_width);
         bsram_fix_outreg(ci, bit_width, id_CEA, id_OCEA, id_CLKA, id_RESETA, id_DOA, id_READ_MODE0, new_cells);
     }
     bsram_rename_ports(ci, bit_width, "DOA[%d]", "DOA%d");
     // In BYPASS mode, the OCE signal is dictated by CE.
     if (dp_ce_fix) {
         if (bit_width <= 9) {
-            if (force_dp_ce_fix && !gwu.need_BSRAM_DP_CE_fix())
-                log_info("  GOWIN_FORCE_BSRAM_DP_CE_FIX: forcing DP CE/OCE fix on %s port A (bit_width=%d)\n",
-                         ci->name.c_str(ctx), bit_width);
             ci->disconnectPort(id_OCEA);
             ci->copyPortTo(id_CEA, ci, id_OCEA);
         }
@@ -579,9 +533,6 @@ void GowinPacker::pack_DPB(CellInfo *ci, std::vector<std::unique_ptr<CellInfo>> 
     bsram_rename_ports(ci, bit_width, "DIB[%d]", "DIB%d");
 
     if (bit_width < 16 && outreg_fix) {
-        if (force_outreg_fix && !gwu.need_BSRAM_OUTREG_fix())
-            log_info("  GOWIN_FORCE_BSRAM_OUTREG_FIX: forcing OUTREG fix on %s port B (bit_width=%d)\n",
-                     ci->name.c_str(ctx), bit_width);
         bsram_fix_outreg(ci, bit_width, id_CEB, id_OCEB, id_CLKB, id_RESETB, id_DOB, id_READ_MODE1, new_cells);
     }
     bsram_rename_ports(ci, bit_width, "DOB[%d]", "DOB%d");
@@ -589,9 +540,6 @@ void GowinPacker::pack_DPB(CellInfo *ci, std::vector<std::unique_ptr<CellInfo>> 
     // In BYPASS mode, the OCE signal is dictated by CE.
     if (dp_ce_fix) {
         if (bit_width <= 9) {
-            if (force_dp_ce_fix && !gwu.need_BSRAM_DP_CE_fix())
-                log_info("  GOWIN_FORCE_BSRAM_DP_CE_FIX: forcing DP CE/OCE fix on %s port B (bit_width=%d)\n",
-                         ci->name.c_str(ctx), bit_width);
             ci->disconnectPort(id_OCEB);
             ci->copyPortTo(id_CEB, ci, id_OCEB);
         }

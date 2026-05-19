@@ -569,6 +569,19 @@ static bool r56_env_enabled(const char *name)
            strcmp(value, "NO") != 0;
 }
 
+// Default-ON gate (opt-out only): true unless the env var is explicitly
+// set to a falsey value. Used for proven, baked-in fixes (mirrors the
+// gowin.cc r57_env_disabled / GOWIN_BUFFER_LUTS default-ON policy).
+static bool r56_env_default_on(const char *name)
+{
+    const char *value = getenv(name);
+    if (value == nullptr || value[0] == '\0')
+        return true;
+    return !(strcmp(value, "0") == 0 || strcmp(value, "false") == 0 || strcmp(value, "FALSE") == 0 ||
+             strcmp(value, "off") == 0 || strcmp(value, "OFF") == 0 || strcmp(value, "no") == 0 ||
+             strcmp(value, "NO") == 0);
+}
+
 static bool is_sdram_dq_iobuf(const Context *ctx, const CellInfo &ci)
 {
     if (ci.type != id_IOBUF)
@@ -654,10 +667,12 @@ void GowinPacker::pack_io_regs(void)
         // at the netlist level: the net becomes multi-fanout, the
         // users.entries()==1 R56-tag/near-IOB path below is NOT taken
         // (same as r70P), and the router clocks the capture FF off the
-        // main spine. Env-gated, default OFF: r35/EXP_HH has
-        // R56_DQ_PATHB=0 (is_r56_fabric_dq_iobuf == false) AND never sets
-        // this var -> bitstream byte-identical (md5 29359f54) two ways.
-        if (r56_env_enabled("R56_DQ_FABRIC_AWAY") && is_r56_fabric_dq_iobuf(ctx, ci) &&
+        // main spine. BAKED-IN DEFAULT-ON (proven HW fix; opt out with
+        // R56_DQ_FABRIC_AWAY=0). r35/EXP_HH has R56_DQ_PATHB=0 so
+        // is_r56_fabric_dq_iobuf == false -> this whole block is
+        // unreachable for EXP_HH -> bitstream byte-identical (md5
+        // 29359f54) regardless of the default.
+        if (r56_env_default_on("R56_DQ_FABRIC_AWAY") && is_r56_fabric_dq_iobuf(ctx, ci) &&
             ci.getPort(id_O) != nullptr) {
             NetInfo *o_net = ci.ports.at(id_O).net;
             if (o_net != nullptr && o_net->users.entries() == 1 &&
