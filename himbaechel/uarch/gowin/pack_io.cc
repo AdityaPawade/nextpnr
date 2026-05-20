@@ -582,6 +582,19 @@ static bool r56_env_default_on(const char *name)
              strcmp(value, "NO") == 0);
 }
 
+// Narrow detector for DQ[12] only (per S2986 fingerprint: DQ[12]'s capture
+// edge is the marginal one producing the 1-bit error in 12:00EF7E80 vs the
+// Gowin reference 12:10EF6E80).
+static bool is_sdram_dq12_iobuf(const Context *ctx, const CellInfo &ci)
+{
+    if (ci.type != id_IOBUF)
+        return false;
+    std::string name = ci.name.str(ctx);
+    return name.find(".IO_sdram_dq[12]") != std::string::npos ||
+           (name.find("gen_sdram_dq_iob[12]") != std::string::npos &&
+            name.find(".u_sdram_dq_iobuf") != std::string::npos);
+}
+
 static bool is_sdram_dq_iobuf(const Context *ctx, const CellInfo &ci)
 {
     if (ci.type != id_IOBUF)
@@ -663,6 +676,93 @@ void GowinPacker::pack_io_regs(void)
         CellInfo *iologic_i = nullptr;
         bool r56_keep_fabric_dq_input = false;
 
+        // === EXP_HH DQ[12] narrow probes (2026-05-20, post-S2986 fingerprint)
+        //
+        // The OSS EXP_HH build deterministically reads bit 12 of the 32-bit
+        // firmware word INVERTED relative to the Gowin twin reference:
+        //   Gowin: 12:10EF6E80 -> READY    (correct DQ[12] both halves)
+        //   OSS:   12:00EF7E80              (DQ[12] bits 12 and 28 wrong)
+        // Diagnosis: DQ[12] capture FF (currently at X3Y34/DFF6, 2 fabric
+        // rows up from the IOB at X3Y36/IOBA) sits at a marginal capture
+        // edge of the SDRAM read window. Two narrow probes, both env-gated
+        // OFF by default (so baseline 2eb1dd7b bitstream is preserved):
+        //
+        // Path B (EXP_HH_DQ12_LOCK=1): lock DQ[12]'s capture DFFCE to
+        // X3Y35/DFF6 -- one row closer to the IOB. NO IOLOGIC, NO fuse
+        // changes, only placement. If this shifts timing into a stable
+        // window, bit 12 inversion goes away.
+        //
+        // Path A (EXP_HH_DQ12_IOLOGIC=1): mark just the DQ[12] IOBUF with
+        // id_IOBFF so the existing line ~723 IOLOGICI_EMPTY pipeline fires
+        // for THAT ONE pin. All 15 other DQ pins keep the current fabric
+        // capture (this is the deliberate narrowing of the morning's
+        // wholesale Phase-3 attempt that produced all zeros).
+        if (is_sdram_dq12_iobuf(ctx, ci) && ci.getPort(id_O) != nullptr) {
+            const bool dq12_lock = r56_env_enabled("EXP_HH_DQ12_LOCK");
+            const bool dq12_iologic = r56_env_enabled("EXP_HH_DQ12_IOLOGIC");
+            NetInfo *o_net = ci.ports.at(id_O).net;
+            if (dq12_iologic) {
+                // Path A: tag this single IOBUF with IOBFF; line 723 will
+                // emit one IOLOGICI_EMPTY for DQ[12], no others.
+                ci.setAttr(id_IOBFF, 1);
+                log_info("  EXP_HH_DQ12_IOLOGIC=1: tagged %s with IOBFF for narrow IOLOGIC.\n",
+                         ctx->nameOf(&ci));
+            }
+            if (dq12_lock && o_net != nullptr) {
+                // Path B: find the single downstream DFF (skipping any
+                // LUT4 buffer/msink hop) and lock its BEL to X3Y35/DFF6.
+                CellInfo *target_ff = nullptr;
+                for (auto &usr : o_net->users) {
+                    CellInfo *u = usr.cell;
+                    if (u == nullptr) continue;
+                    if (u->type.in(id_DFFCE, id_DFFRE, id_DFFE, id_DFF, id_DFFSE, id_DFFPE) &&
+                        usr.port == id_D) {
+                        target_ff = u;
+                        break;
+                    }
+                    // hop through a single-input buffer LUT (BUFLUT or msink)
+                    if (u->type == id_LUT4 && (usr.port == id_I0 || usr.port == id_I3)) {
+                        NetInfo *f_net = u->getPort(id_F);
+                        if (f_net != nullptr) {
+                            for (auto &usr2 : f_net->users) {
+                                if (usr2.cell != nullptr &&
+                                    usr2.cell->type.in(id_DFFCE, id_DFFRE, id_DFFE, id_DFF,
+                                                        id_DFFSE, id_DFFPE) &&
+                                    usr2.port == id_D) {
+                                    target_ff = usr2.cell;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if (target_ff != nullptr) break;
+                }
+                if (target_ff != nullptr) {
+                    // Use bindBel directly (same pattern as gowin.cc:1239 R56
+                    // path). setAttr(id_BEL,...) gets cleared by some later
+                    // pack/placer pass for fabric DFFs, so we lock the
+                    // binding here unconditionally.
+                    BelId target_bel = ctx->getBelByNameStr("X3Y35/DFF6");
+                    if (target_bel == BelId()) {
+                        log_warning("EXP_HH_DQ12_LOCK=1: X3Y35/DFF6 BEL not found in chipdb; skipping.\n");
+                    } else if (!ctx->checkBelAvail(target_bel)) {
+                        log_warning("EXP_HH_DQ12_LOCK=1: X3Y35/DFF6 already taken by %s; skipping.\n",
+                                    ctx->nameOf(ctx->getBoundBelCell(target_bel)));
+                    } else if (target_ff->bel != BelId()) {
+                        log_warning("EXP_HH_DQ12_LOCK=1: %s already bound to %s; skipping.\n",
+                                    ctx->nameOf(target_ff), ctx->nameOfBel(target_ff->bel));
+                    } else {
+                        ctx->bindBel(target_bel, target_ff, PlaceStrength::STRENGTH_LOCKED);
+                        log_info("  EXP_HH_DQ12_LOCK=1: locked %s capture FF %s to X3Y35/DFF6 (bindBel).\n",
+                                 ctx->nameOf(&ci), ctx->nameOf(target_ff));
+                    }
+                } else {
+                    log_warning("EXP_HH_DQ12_LOCK=1: could not find a downstream DFF for %s.\n",
+                                ctx->nameOf(&ci));
+                }
+            }
+        }
+
         // R76G: env-gated synthetic multi-sink. Root cause (this session,
         // multi-artifact + Codex-corroborated): for a SINGLE-fanout
         // SDRAM-DQ IOBUF.O, nextpnr deterministically routes the capture
@@ -683,8 +783,15 @@ void GowinPacker::pack_io_regs(void)
         // is_r56_fabric_dq_iobuf == false -> this whole block is
         // unreachable for EXP_HH -> bitstream byte-identical (md5
         // 29359f54) regardless of the default.
+        // 2026-05-20 narrow gate: skip R76G synthetic-msink when this IOBUF was
+        // tagged with IOBFF by the EXP_HH DQ[12] narrow IOLOGIC probe above.
+        // R76G's purpose is to force the FF onto the main clock spine for
+        // fabric capture; when we're routing the capture through the IOLOGIC
+        // input register, the msink would only defeat the IOLOGICI_EMPTY
+        // single-fanout check at line ~723. Limiting this skip to IOBFF-tagged
+        // IOBUFs keeps R76G default-ON for every other DQ pin.
         if (r56_env_default_on("R56_DQ_FABRIC_AWAY") && is_r56_fabric_dq_iobuf(ctx, ci) &&
-            ci.getPort(id_O) != nullptr) {
+            ci.getPort(id_O) != nullptr && !ci.attrs.count(id_IOBFF)) {
             NetInfo *o_net = ci.ports.at(id_O).net;
             if (o_net != nullptr && o_net->users.entries() == 1 &&
                 net_only_drives(ctx, o_net, is_ff, id_D) != nullptr) {
@@ -706,7 +813,13 @@ void GowinPacker::pack_io_regs(void)
             }
         }
 
-        if (is_r56_fabric_dq_iobuf(ctx, ci) && ci.getPort(id_O) != nullptr) {
+        // 2026-05-20 narrow gate: skip R56 fabric-keep when this IOBUF was
+        // tagged IOBFF by the EXP_HH DQ[12] narrow IOLOGIC probe. Otherwise
+        // R56 sets r56_keep_fabric_dq_input=true and blocks the IOLOGICI
+        // pipeline at line ~723. Limiting the skip to IOBFF-tagged IOBUFs
+        // keeps R56 active for every other DQ pin.
+        if (is_r56_fabric_dq_iobuf(ctx, ci) && ci.getPort(id_O) != nullptr &&
+            !ci.attrs.count(id_IOBFF)) {
             CellInfo *ff = net_only_drives(ctx, ci.ports.at(id_O).net, is_ff, id_D);
             if (ff != nullptr && ci.ports.at(id_O).net->users.entries() == 1) {
                 ff->setAttr(ctx->id("R56_FABRIC_DQ_CAPTURE"), 1);
