@@ -927,18 +927,6 @@ void GowinPacker::insert_buffer_luts_for_orphan_dffs(void)
     log_info("Buffer-LUT budget: %d LUT BELs total, %d existing LUTs, %d max buffers (HEADROOM=%d).\n",
              total_lut_bels, existing_luts, max_buffers, HEADROOM);
 
-    // 2026-05-21 EXP_HH narrow Path B: skip BUFLUT for DQ[12]'s capture FF.
-    // When EXP_HH_DQ12_LOCK=1 is set, the pack_io.cc hook has called
-    // ctx->bindBel(X3Y35/DFF6, ...) to lock the placement; wrapping that DFF
-    // with a BUFLUT here turns it into a clustered cell and the bindBel is
-    // effectively cleared. Skipping BUFLUT for THIS one FF preserves the
-    // direct IOBUF.O -> DFF.D connection that mirrors Gowin's structure.
-    const char *dq12_lock_env = getenv("EXP_HH_DQ12_LOCK");
-    bool dq12_lock_active = (dq12_lock_env != nullptr && dq12_lock_env[0] != '\0' &&
-                              strcmp(dq12_lock_env, "0") != 0 &&
-                              strcmp(dq12_lock_env, "false") != 0 &&
-                              strcmp(dq12_lock_env, "off") != 0);
-
     int idx = 0;
     for (CellInfo *dff : dffs) {
         // Skip DFFs already in a cluster (LUTFF or ALU+DFF).
@@ -950,18 +938,6 @@ void GowinPacker::insert_buffer_luts_for_orphan_dffs(void)
         if (!src_net) {
             ++no_d_source;
             continue;
-        }
-        // Path B skip: if this DFF's D net is driven by the DQ[12] IOBUF.O,
-        // skip BUFLUT so the placement-lock survives.
-        if (dq12_lock_active && src_net->driver.cell != nullptr) {
-            std::string drv_name = src_net->driver.cell->name.str(ctx);
-            if (drv_name.find(".IO_sdram_dq[12]") != std::string::npos &&
-                src_net->driver.cell->type == id_IOBUF) {
-                log_info("  EXP_HH_DQ12_LOCK=1: skipping BUFLUT for DQ[12] capture FF %s "
-                         "(preserves bindBel lock at X3Y35/DFF6).\n",
-                         ctx->nameOf(dff));
-                continue;
-            }
         }
 
         // Skip if we'd exceed the LUT BEL budget.  Remaining orphan DFFs
