@@ -651,6 +651,37 @@ void GowinPacker::pack_io_regs(void)
             continue;
         }
 
+        // Structural auto-IOBFF (GW5A-25A / GW5AST-138C): when a bidirectional
+        // IOBUF has its .I port driven by a single-sink FF.Q AND an IOLOGIC
+        // output-register BEL is available, tag IOBFF so the existing
+        // IOLOGICO_EMPTY pipeline below emits the OREG attribute set. This
+        // mirrors Gowin EDA's pattern at the 16 SDRAM-DQ tiles in the working
+        // EXPHH_loaderfit_GOWIN twin. Limited to IOBUF (not OBUF) because
+        // wholesale extension to OBUFs over-applied to flash_spi_clk and
+        // O_sdram_addr_*, producing dead silicon on Tang Primer 25K HW
+        // (boot loader could not read firmware.bin via SPI). Gowin emits OREG
+        // on 13 OBUFs too, but the placement / SPI timing-criticality there
+        // requires a finer trigger than "single-sink FF.Q on .I" — to be
+        // determined when the SDRAM-DQ path is HW-validated and we have the
+        // OREG-causality structurally proven. Purely structural rule for now —
+        // no signal-name matching, no env gate.
+        if (ci.type == id_IOBUF && !ci.attrs.count(id_IOBFF) && is_gw5a25a(ctx)) {
+            if (ci.getPort(id_I) != nullptr) {
+                NetInfo *i_net = ci.ports.at(id_I).net;
+                if (i_net != nullptr &&
+                    net_driven_by(ctx, i_net, is_ff, id_Q) != nullptr &&
+                    i_net->users.entries() == 1 &&
+                    get_iologico_bel(&ci) != BelId()) {
+                    ci.setAttr(id_IOBFF, 1);
+                    if (ctx->verbose) {
+                        log_info("  auto-iobff (gw5a structural): IOBUF %s .I driven by "
+                                 "single-sink FF.Q -> tagging IOBFF\n",
+                                 ctx->nameOf(&ci));
+                    }
+                }
+            }
+        }
+
         // In the case of placing multiple registers in the IO it should be
         // noted that the CLK, ClockEnable and LocalSetReset nets must
         // match.
@@ -723,61 +754,69 @@ void GowinPacker::pack_io_regs(void)
         if (!r56_keep_fabric_dq_input &&
             ((ci.type == id_IBUF && (ctx->settings.count(id_IREG_IN_IOB) || ci.attrs.count(id_IOBFF))) ||
              (ci.type == id_IOBUF && (ctx->settings.count(id_IOREG_IN_IOB) || ci.attrs.count(id_IOBFF))))) {
-
-            if (ci.getPort(id_O) == nullptr) {
-                continue;
-            }
-            // OBUF O -> D FF
-            CellInfo *ff = net_only_drives(ctx, ci.ports.at(id_O).net, is_ff, id_D);
-            if (ff == nullptr) {
-                if (ci.attrs.count(id_IOBFF)) {
-                    log_warning("Port O of %s is not connected to FF.\n", ctx->nameOf(&ci));
-                }
-                continue;
-            }
-            if (ci.ports.at(id_O).net->users.entries() != 1) {
-                if (ci.attrs.count(id_IOBFF)) {
-                    log_warning("Port O of %s is the driver of %s multi-sink network.\n", ctx->nameOf(&ci),
-                                ctx->nameOf(ci.ports.at(id_O).net));
-                }
-                continue;
-            }
-            BelId l_bel = get_iologici_bel(&ci);
-            if (l_bel == BelId()) {
-                continue;
-            }
-            if (ctx->debug) {
-                log_info(" trying %s ff as Input Register of %s IO\n", ctx->nameOf(ff), ctx->nameOf(&ci));
-            }
-
-            clk_net = ff->getPort(id_CLK);
-            ce_net = ff->getPort(id_CE);
-            for (IdString port : {id_SET, id_RESET, id_PRESET, id_CLEAR}) {
-                lsr_net = ff->getPort(port);
-                if (lsr_net != nullptr) {
+            // Wrapped in do-while(false) so the per-condition early-outs use
+            // `break` instead of `continue`. The old `continue`s skipped the
+            // entire cell-loop iteration — INCLUDING the IOLOGICO_EMPTY block
+            // below — so IOBUFs whose .O was multi-sink (e.g. SDRAM-DQ after
+            // R76G injects its keep-buffer) never got a chance to register
+            // their .I-side output FF as IOLOGIC OREG. Mirroring the existing
+            // do-while pattern used by the IOLOGICO_EMPTY block (line 813+).
+            do {
+                if (ci.getPort(id_O) == nullptr) {
                     break;
                 }
-            }
-            reg_type = ff->type;
+                // OBUF O -> D FF
+                CellInfo *ff = net_only_drives(ctx, ci.ports.at(id_O).net, is_ff, id_D);
+                if (ff == nullptr) {
+                    if (ci.attrs.count(id_IOBFF)) {
+                        log_warning("Port O of %s is not connected to FF.\n", ctx->nameOf(&ci));
+                    }
+                    break;
+                }
+                if (ci.ports.at(id_O).net->users.entries() != 1) {
+                    if (ci.attrs.count(id_IOBFF)) {
+                        log_warning("Port O of %s is the driver of %s multi-sink network.\n", ctx->nameOf(&ci),
+                                    ctx->nameOf(ci.ports.at(id_O).net));
+                    }
+                    break;
+                }
+                BelId l_bel = get_iologici_bel(&ci);
+                if (l_bel == BelId()) {
+                    break;
+                }
+                if (ctx->debug) {
+                    log_info(" trying %s ff as Input Register of %s IO\n", ctx->nameOf(ff), ctx->nameOf(&ci));
+                }
 
-            // create IOLOGIC cell for flipflop
-            IdString iologic_name = gwu.create_aux_name(ci.name, 0, "_iobff$");
-            auto iologic_cell = gwu.create_cell(iologic_name, id_IOLOGICI_EMPTY);
-            new_cells.push_back(std::move(iologic_cell));
-            iologic_i = new_cells.back().get();
+                clk_net = ff->getPort(id_CLK);
+                ce_net = ff->getPort(id_CE);
+                for (IdString port : {id_SET, id_RESET, id_PRESET, id_CLEAR}) {
+                    lsr_net = ff->getPort(port);
+                    if (lsr_net != nullptr) {
+                        break;
+                    }
+                }
+                reg_type = ff->type;
 
-            // move ports
-            for (auto &port : ff->ports) {
-                IdString port_name = port.first;
-                ff->movePortTo(port_name, iologic_i, port_name != id_Q ? port_name : id_Q4);
-            }
-            if (ctx->verbose) {
-                log_info("  place FF %s into IBUF %s, make iologic_i %s\n", ctx->nameOf(ff), ctx->nameOf(&ci),
-                         ctx->nameOf(iologic_i));
-            }
-            iologic_i->setAttr(id_HAS_REG, 1);
-            iologic_i->setAttr(id_IREG_TYPE, ff->type.str(ctx));
-            cells_to_remove.push_back(ff->name);
+                // create IOLOGIC cell for flipflop
+                IdString iologic_name = gwu.create_aux_name(ci.name, 0, "_iobff$");
+                auto iologic_cell = gwu.create_cell(iologic_name, id_IOLOGICI_EMPTY);
+                new_cells.push_back(std::move(iologic_cell));
+                iologic_i = new_cells.back().get();
+
+                // move ports
+                for (auto &port : ff->ports) {
+                    IdString port_name = port.first;
+                    ff->movePortTo(port_name, iologic_i, port_name != id_Q ? port_name : id_Q4);
+                }
+                if (ctx->verbose) {
+                    log_info("  place FF %s into IBUF %s, make iologic_i %s\n", ctx->nameOf(ff), ctx->nameOf(&ci),
+                             ctx->nameOf(iologic_i));
+                }
+                iologic_i->setAttr(id_HAS_REG, 1);
+                iologic_i->setAttr(id_IREG_TYPE, ff->type.str(ctx));
+                cells_to_remove.push_back(ff->name);
+            } while (false);
         }
 
         // output reg in IO
