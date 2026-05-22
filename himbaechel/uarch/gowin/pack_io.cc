@@ -746,6 +746,73 @@ void GowinPacker::pack_io_regs(void)
         CellInfo *iologic_i = nullptr;
         bool r56_keep_fabric_dq_input = false;
 
+        // EXP_HH DQ[12] IOLOGIC input-register migration (codex job
+        // 9113ce1b, 2026-05-22). Env-gated by EXP_HH_DQ12_IOLOGIC=1,
+        // default OFF -> baseline 2eb1dd7b reproduces byte-identical.
+        //
+        // Mission: SDRAM-DQ[12] reads INVERTED on the OSS toolchain
+        // (firmware-stream 12:00EF7E80 vs the proven Gowin EDA twin's
+        // 12:10EF6E80 -> READY). The Gowin .vg RE (job 9113ce1b) showed
+        // Gowin's synthesis emits a plain TBUF for every SDRAM-DQ pin;
+        // the IOLOGIC input register at R37C4 is produced by Gowin's
+        // PLACER auto-packing the fabric capture FF into the IOB. OSS
+        // leaves that FF in a fabric DFFCE (LOGIC tile X3Y35) -> wrong
+        // sample phase -> inverted read.
+        //
+        // The 3 prior IOLOGIC HW failures (md5 09fc2470/1e923f48/eed1fedd,
+        // dead silicon) happened because apicula's GW5A IOLOGIC fuse
+        // vocabulary was only ~32/141 complete: nextpnr requested an
+        // IOLOGIC register, apicula encoded it with MISSING fuses ->
+        // electrically-underspecified IOB. The 2026-05 DB-vocab expansion
+        // (overlay v7 = 102/141, and 21/21 for DQ[12]) + the GW5A IODELAY
+        // encoder fix (apicula 834622f) closed that gap, so apicula can
+        // now write the complete IOLOGICI_EMPTY+HAS_REG fuse set.
+        //
+        // Scope: DQ[12] ONLY, INPUT register ONLY (no OREG/TREG migration).
+        // Placed BEFORE the r76G synthetic-multi-sink block so the
+        // single-fanout O net is intact for net_only_drives(). On success
+        // the fabric FF becomes an IOLOGICI_EMPTY cell (no longer is_ff),
+        // so the r76G / r56 / generic-806 / generic-868 blocks below all
+        // naturally skip DQ[12] -> no edits to those blocks are needed.
+        bool dq12_iologic_migrated = false;
+        if (is_sdram_dq12_iobuf(ctx, ci) && r56_env_enabled("EXP_HH_DQ12_IOLOGIC") &&
+            ci.getPort(id_O) != nullptr) {
+            NetInfo *o_net = ci.ports.at(id_O).net;
+            CellInfo *ff = (o_net != nullptr) ? net_only_drives(ctx, o_net, is_ff, id_D) : nullptr;
+            if (ff == nullptr) {
+                log_warning("EXP_HH_DQ12_IOLOGIC: DQ[12] O net has no single fabric capture "
+                            "FF; skipping migration (baseline preserved).\n");
+            } else if (o_net->users.entries() != 1) {
+                log_warning("EXP_HH_DQ12_IOLOGIC: DQ[12] O net is multi-sink; skipping "
+                            "migration (baseline preserved).\n");
+            } else {
+                BelId l_bel = get_iologici_bel(&ci);
+                if (l_bel == BelId()) {
+                    log_warning("EXP_HH_DQ12_IOLOGIC: no IOLOGICI bel for DQ[12]; skipping.\n");
+                } else {
+                    std::string ff_type = ff->type.str(ctx);
+                    IdString iologic_name = gwu.create_aux_name(ci.name, 0, "_dq12_iobff$");
+                    auto iologic_cell = gwu.create_cell(iologic_name, id_IOLOGICI_EMPTY);
+                    new_cells.push_back(std::move(iologic_cell));
+                    CellInfo *dq12_iologic = new_cells.back().get();
+                    for (auto &port : ff->ports) {
+                        IdString port_name = port.first;
+                        ff->movePortTo(port_name, dq12_iologic,
+                                       port_name != id_Q ? port_name : id_Q4);
+                    }
+                    dq12_iologic->setAttr(id_HAS_REG, 1);
+                    dq12_iologic->setAttr(id_IREG_TYPE, ff_type);
+                    cells_to_remove.push_back(ff->name);
+                    dq12_iologic_migrated = true;
+                    log_info("  EXP_HH_DQ12_IOLOGIC: migrated DQ[12] capture FF %s into "
+                             "IOLOGICI_EMPTY %s (HAS_REG=1, IREG_TYPE=%s) -- input register "
+                             "only, no OREG/TREG.\n",
+                             ctx->nameOf(ff), ctx->nameOf(dq12_iologic), ff_type.c_str());
+                }
+            }
+        }
+        (void)dq12_iologic_migrated;
+
         // R76G: env-gated synthetic multi-sink. Root cause (this session,
         // multi-artifact + Codex-corroborated): for a SINGLE-fanout
         // SDRAM-DQ IOBUF.O, nextpnr deterministically routes the capture
