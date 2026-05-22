@@ -806,6 +806,38 @@ void GowinPacker::pack_io_regs(void)
                     cells_to_remove.push_back(ff->name);
                     dq12_iologic_migrated = true;
 
+                    // EXP_HH DQ[12] IODELAY (fuse-diff vs Gowin twin,
+                    // 2026-05-23). Env-gated EXP_HH_DQ12_IODELAY=1, default
+                    // OFF -> baseline 2eb1dd7b reproduces byte-identical.
+                    //
+                    // Decode-diff of the OSS IOLOGIC build .fs vs the Gowin
+                    // EXP_HH twin .fs at the DQ[12] IOB tile R36C3: the Gowin
+                    // twin sets apicula feature code 32 = DELAY_DEL0 at bit
+                    // (31,55) -- it applies a 1-tap input delay to DQ[12].
+                    // The OSS IOLOGIC migration omits it. Firmware-ground-
+                    // truth proof: DQ[12] reads STUCK-AT-0 (all 7 firmware
+                    // DQ[12]=1 bits read 0). Mechanism: the migrated IOLOGIC
+                    // input register sits at the pad with near-zero input
+                    // delay and samples EARLIER than the fabric capture FF it
+                    // replaced (which had routing delay) -- ahead of the
+                    // SDRAM read-data valid window -> it captures the idle/
+                    // pre-charge bus -> stuck-0. Gowin's DEL0 tap pushes the
+                    // sample point back into the valid window. This sets
+                    // IODELAY + C_STATIC_DLY on the DQ[12] IOLOGIC cell
+                    // exactly as the generic pack_iodelay() path does;
+                    // apicula make_gw5a_iodelay_attrs() (runs for every
+                    // GW5A-25A IOLOGIC cell) then emits feature code 32 ->
+                    // bit (31,55), byte-matching the Gowin twin's DEL0.
+                    if (r56_env_enabled("EXP_HH_DQ12_IODELAY")) {
+                        dq12_iologic->setAttr(id_IODELAY, Property("IN"));
+                        dq12_iologic->setParam(id_C_STATIC_DLY, Property("1"));
+                        log_info("  EXP_HH_DQ12_IODELAY: added input delay to "
+                                 "DQ[12] IOLOGIC %s (IODELAY=IN, "
+                                 "C_STATIC_DLY=1 -> DELAY_DEL0 tap, matches "
+                                 "Gowin twin bit (31,55)).\n",
+                                 ctx->nameOf(dq12_iologic));
+                    }
+
                     // OE-register replication into the SAME IOLOGIC cell
                     // (codex job f4a5237f, Plan B, 2026-05-22). Env-gated by
                     // EXP_HH_DQ12_TREG=1, default OFF.
