@@ -973,6 +973,67 @@ void GowinPacker::pack_io_regs(void)
         }
         (void)dq12_iologic_migrated;
 
+        // EXP_HH DQ[12] fabric-path input IODELAY (overnight timing fix,
+        // 2026-05-23). Env-gated EXP_HH_DQ12_IODELAY_FAB=<C_STATIC_DLY>,
+        // default OFF -> baseline 2eb1dd7b reproduces byte-identical.
+        //
+        // Diagnosis (firmware-proven, 3-build cross-check): DQ[12]'s fabric
+        // SDRAM-read capture is METASTABLE -- it samples the read data at a
+        // marginal timing edge; two builds of the same fabric design
+        // disagree on WHICH DQ[12] beats are wrong (build-dependent wrong-set
+        // = the metastability signature). The other 15 DQ bits clear the
+        // window. Fix: add a small input delay to DQ[12] ONLY to shift its
+        // sample off the transition edge into the stable read-data window.
+        //
+        // Inserts a NON-registered IOLOGICI_EMPTY (a pure input delay line:
+        // IODELAY=IN, NO HAS_REG) between the DQ[12] IOBUF.O and the existing
+        // fabric capture FF -- the FF stays in fabric (the proven-for-15-bits
+        // path); only the pad->fabric data arrival is delayed. Distinct from
+        // the dead registered-IOLOGIC (no register, just the DEL taps). The
+        // fabric FF is moved off the O-net onto the IOLOGIC.Q net, so the
+        // r76G / r56 / generic blocks below see no FF on the O-net and
+        // naturally skip DQ[12]; pack_iodelay() also skips (this is an
+        // IOLOGICI_EMPTY cell carrying an IODELAY attr, not an IODELAY
+        // primitive). pack_iologic()::pack_ides_iol folds the IOLOGIC into
+        // the IOB; apicula make_gw5a_iodelay_attrs() emits the DEL taps from
+        // C_STATIC_DLY (bit0 -> DEL0 @(31,55); bit6 -> DEL6 @(31,56)).
+        {
+            const char *idel_env = getenv("EXP_HH_DQ12_IODELAY_FAB");
+            if (idel_env != nullptr && idel_env[0] != '\0' &&
+                is_sdram_dq12_iobuf(ctx, ci) && ci.getPort(id_O) != nullptr &&
+                get_iologici_bel(&ci) != BelId()) {
+                NetInfo *o_net = ci.ports.at(id_O).net;
+                CellInfo *cap_ff = (o_net != nullptr)
+                        ? net_only_drives(ctx, o_net, is_ff, id_D) : nullptr;
+                if (cap_ff == nullptr) {
+                    log_warning("EXP_HH_DQ12_IODELAY_FAB: DQ[12] O-net has no "
+                                "single fabric capture FF; skipping (baseline "
+                                "preserved).\n");
+                } else {
+                    IdString iol_name = gwu.create_aux_name(ci.name, 3, "_dq12_idel$");
+                    auto iol_cell = gwu.create_cell(iol_name, id_IOLOGICI_EMPTY);
+                    new_cells.push_back(std::move(iol_cell));
+                    CellInfo *dq12_idel = new_cells.back().get();
+                    IdString qnet_name =
+                            gwu.create_aux_name(ci.name, 4, "_dq12_idel_q$");
+                    NetInfo *qnet = ctx->createNet(qnet_name);
+                    dq12_idel->addInput(id_D);
+                    dq12_idel->addOutput(id_Q);
+                    dq12_idel->connectPort(id_D, o_net);
+                    dq12_idel->connectPort(id_Q, qnet);
+                    cap_ff->disconnectPort(id_D);
+                    cap_ff->connectPort(id_D, qnet);
+                    dq12_idel->setAttr(id_IODELAY, Property("IN"));
+                    dq12_idel->setParam(id_C_STATIC_DLY,
+                                        Property(std::string(idel_env)));
+                    log_info("  EXP_HH_DQ12_IODELAY_FAB: inserted non-registered "
+                             "input IODELAY (C_STATIC_DLY=%s) before DQ[12] "
+                             "fabric capture FF %s; r76G/pack_iodelay auto-skip.\n",
+                             idel_env, ctx->nameOf(cap_ff));
+                }
+            }
+        }
+
         // R76G: env-gated synthetic multi-sink. Root cause (this session,
         // multi-artifact + Codex-corroborated): for a SINGLE-fanout
         // SDRAM-DQ IOBUF.O, nextpnr deterministically routes the capture
