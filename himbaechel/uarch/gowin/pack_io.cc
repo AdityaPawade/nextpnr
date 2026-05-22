@@ -791,6 +791,7 @@ void GowinPacker::pack_io_regs(void)
                     log_warning("EXP_HH_DQ12_IOLOGIC: no IOLOGICI bel for DQ[12]; skipping.\n");
                 } else {
                     std::string ff_type = ff->type.str(ctx);
+                    const NetInfo *input_clk = ff->getPort(id_CLK);
                     IdString iologic_name = gwu.create_aux_name(ci.name, 0, "_dq12_iobff$");
                     auto iologic_cell = gwu.create_cell(iologic_name, id_IOLOGICI_EMPTY);
                     new_cells.push_back(std::move(iologic_cell));
@@ -804,10 +805,67 @@ void GowinPacker::pack_io_regs(void)
                     dq12_iologic->setAttr(id_IREG_TYPE, ff_type);
                     cells_to_remove.push_back(ff->name);
                     dq12_iologic_migrated = true;
+
+                    // OE-register replication into the SAME IOLOGIC cell
+                    // (codex job f4a5237f, Plan B, 2026-05-22). Env-gated by
+                    // EXP_HH_DQ12_TREG=1, default OFF.
+                    //
+                    // HW: the input migration fixes DQ[12] on the FIRST
+                    // 16-bit SDRAM read but misses the consecutive SECOND
+                    // read (OLED step-12 word bit 28) -> bus-turnaround
+                    // timing. Gowin packs the DQ output-enable register into
+                    // the IOB IOLOGIC tri-state register; OSS leaves it in
+                    // fabric. A GW5A IOB has ONE IOLOGIC bel holding the
+                    // input + tri-state registers TOGETHER, so the TREG is
+                    // added to dq12_iologic — a 2nd IOLOGIC cell on one IOB
+                    // crashes the later Pack-IO-logic pass (dict::at()).
+                    //
+                    // The OE FF is BUS-WIDE (one DFFPE drives all 16 SDRAM-DQ
+                    // OENs) so it is REPLICATED, not moved: its D-net is
+                    // copied as this cell's TX input (the IOLOGIC TREG shares
+                    // the cell CLK with the input register — only valid when
+                    // the OE FF and the input FF share a clock); DQ[12]'s
+                    // IOBUF.OEN is disconnected (the IOLOGIC drives the IOB
+                    // OE internally, same model as the generic OEN-reg
+                    // path); the original FF + bus-wide OEN net stay intact
+                    // for the other 15 pins.
+                    bool treg_added = false;
+                    if (r56_env_enabled("EXP_HH_DQ12_TREG") &&
+                        ci.getPort(id_OEN) != nullptr &&
+                        get_iologico_bel(&ci) != BelId()) {
+                        NetInfo *oen_net = ci.ports.at(id_OEN).net;
+                        CellInfo *oe_ff = (oen_net != nullptr)
+                                ? net_driven_by(ctx, oen_net, is_ff, id_Q) : nullptr;
+                        if (oe_ff == nullptr) {
+                            log_warning("EXP_HH_DQ12_TREG: DQ[12] OEN not FF-driven; "
+                                        "skipping TREG replication.\n");
+                        } else if (oe_ff->getPort(id_CLK) != input_clk) {
+                            log_warning("EXP_HH_DQ12_TREG: OE FF clock differs from the "
+                                        "DQ[12] input-register clock; one IOLOGIC bel "
+                                        "has a single CLK -- skipping TREG.\n");
+                        } else {
+                            NetInfo *oe_d = oe_ff->getPort(id_D);
+                            if (oe_d != nullptr) {
+                                dq12_iologic->addInput(id_TX);
+                                dq12_iologic->connectPort(id_TX, oe_d);
+                                dq12_iologic->setAttr(id_TREG_TYPE,
+                                                      oe_ff->type.str(ctx));
+                                ci.disconnectPort(id_OEN);
+                                treg_added = true;
+                                log_info("  EXP_HH_DQ12_TREG: added DQ[12] tri-state "
+                                         "register to %s (TX <- bus-wide OE FF %s "
+                                         "D-net, TREG_TYPE=%s, shared IOLOGIC CLK); "
+                                         "original FF retained for the other 15 "
+                                         "SDRAM-DQ pins.\n",
+                                         ctx->nameOf(dq12_iologic),
+                                         ctx->nameOf(oe_ff), oe_ff->type.c_str(ctx));
+                            }
+                        }
+                    }
                     log_info("  EXP_HH_DQ12_IOLOGIC: migrated DQ[12] capture FF %s into "
-                             "IOLOGICI_EMPTY %s (HAS_REG=1, IREG_TYPE=%s) -- input register "
-                             "only, no OREG/TREG.\n",
-                             ctx->nameOf(ff), ctx->nameOf(dq12_iologic), ff_type.c_str());
+                             "IOLOGICI_EMPTY %s (HAS_REG=1, IREG_TYPE=%s)%s.\n",
+                             ctx->nameOf(ff), ctx->nameOf(dq12_iologic), ff_type.c_str(),
+                             treg_added ? " + tri-state register" : " -- input only");
                 }
             }
         }
