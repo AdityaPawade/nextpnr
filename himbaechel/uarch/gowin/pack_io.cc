@@ -862,6 +862,76 @@ void GowinPacker::pack_io_regs(void)
                             }
                         }
                     }
+
+                    // EXP_HH DQ[12] output-DATA register migration into a
+                    // REAL IOLOGICO_EMPTY cell (codex job 6616ef70 + netlist
+                    // probe, 2026-05-22). Env-gated EXP_HH_DQ12_OREG=1,
+                    // default OFF -> baseline 2eb1dd7b reproduces byte-ident.
+                    //
+                    // Convergence finding: apicula set_empty_ioreg_attrs()
+                    // emits the output-side IOLOGIC fuses (OUTMODE=OREG,
+                    // CLKOMUX, LSRMUX_LSR, SRMODE) ONLY for IOLOGICO_EMPTY
+                    // cells; the IOLOGICI_EMPTY branch handles input fuses
+                    // only and never reads TREG_TYPE/OREG_TYPE. So the v4
+                    // EXP_HH_DQ12_TREG attr (TREG_TYPE on the IOLOGICI_EMPTY
+                    // cell) is a SILENT apicula no-op -- DQ[12]'s IOLOGIC
+                    // output half was never populated. The OSS post-yosys
+                    // netlist is structurally clean (read_high_word[12] and
+                    // read_buffer[12] are symmetric DFFRE, both D <-
+                    // sdram_read_data[12] <- sdram_dq_in[12] <- IOBUF.O), so
+                    // bit 28 is NOT a synthesis bug -- the residual vs the
+                    // Gowin twin is the unpopulated output-side DQ[12]
+                    // IOLOGIC. This block creates the first REAL output-side
+                    // IOLOGIC register for DQ[12] by migrating the per-pin
+                    // output-data FF (IOBUF.I <- FF.Q) into its own
+                    // IOLOGICO_EMPTY cell, mirroring the generic "output reg
+                    // in IO" packer verbatim (D->D0). A GW5A IOB IOLOGIC has
+                    // independent input/output halves, so this IOLOGICO_EMPTY
+                    // co-exists with the IOLOGICI_EMPTY input cell above (the
+                    // same model the generic packer uses for a bidirectional
+                    // IOBUF -- separate cells, not one shared cell, which is
+                    // why the earlier separate-cell-for-OE attempt that
+                    // crashed was wrong: OE merges into the existing cell,
+                    // output-DATA gets its own cell).
+                    if (r56_env_enabled("EXP_HH_DQ12_OREG") &&
+                        ci.getPort(id_I) != nullptr &&
+                        get_iologico_bel(&ci) != BelId()) {
+                        NetInfo *i_net = ci.ports.at(id_I).net;
+                        CellInfo *od_ff = (i_net != nullptr)
+                                ? net_driven_by(ctx, i_net, is_ff, id_Q) : nullptr;
+                        if (od_ff == nullptr) {
+                            log_warning("EXP_HH_DQ12_OREG: DQ[12] I port not "
+                                        "FF-driven; skipping output-register "
+                                        "migration (baseline preserved).\n");
+                        } else if (i_net->users.entries() != 1) {
+                            log_warning("EXP_HH_DQ12_OREG: DQ[12] I net is "
+                                        "multi-sink; skipping output-register "
+                                        "migration (baseline preserved).\n");
+                        } else {
+                            std::string od_type = od_ff->type.str(ctx);
+                            IdString oreg_name =
+                                    gwu.create_aux_name(ci.name, 1, "_dq12_oreg$");
+                            auto oreg_cell =
+                                    gwu.create_cell(oreg_name, id_IOLOGICO_EMPTY);
+                            new_cells.push_back(std::move(oreg_cell));
+                            CellInfo *dq12_oreg = new_cells.back().get();
+                            for (auto &port : od_ff->ports) {
+                                IdString port_name = port.first;
+                                od_ff->movePortTo(port_name, dq12_oreg,
+                                                  port_name != id_D ? port_name
+                                                                    : id_D0);
+                            }
+                            dq12_oreg->setAttr(id_HAS_REG, 1);
+                            dq12_oreg->setAttr(id_OREG_TYPE, od_type);
+                            cells_to_remove.push_back(od_ff->name);
+                            log_info("  EXP_HH_DQ12_OREG: migrated DQ[12] "
+                                     "output-data FF %s into IOLOGICO_EMPTY %s "
+                                     "(HAS_REG=1, OREG_TYPE=%s).\n",
+                                     ctx->nameOf(od_ff), ctx->nameOf(dq12_oreg),
+                                     od_type.c_str());
+                        }
+                    }
+
                     log_info("  EXP_HH_DQ12_IOLOGIC: migrated DQ[12] capture FF %s into "
                              "IOLOGICI_EMPTY %s (HAS_REG=1, IREG_TYPE=%s)%s.\n",
                              ctx->nameOf(ff), ctx->nameOf(dq12_iologic), ff_type.c_str(),
