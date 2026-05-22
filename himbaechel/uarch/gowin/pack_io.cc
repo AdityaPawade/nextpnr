@@ -594,6 +594,23 @@ static bool is_sdram_dq_iobuf(const Context *ctx, const CellInfo &ci)
            name.find(".IO_sdram_dq[") != std::string::npos;
 }
 
+// Narrow detector for DQ[12] only (re-added 2026-05-21 for the placement-
+// perturbation experiment after IOLOGIC OREG path produced 3 HW failures).
+// Codex (job 6c55f8d5) recommends pivoting to baseline-only DQ[12] capture
+// FF placement experiments. Bug is DQ[12] reads INVERTED in baseline
+// (12:00EF7E80 vs Gowin 12:10EF6E80). Default fabric placement puts the
+// capture FF at X3Y34/DFF6 which appears to sample at a marginal SDRAM
+// read-window edge.
+static bool is_sdram_dq12_iobuf(const Context *ctx, const CellInfo &ci)
+{
+    if (ci.type != id_IOBUF)
+        return false;
+    std::string name = ci.name.str(ctx);
+    return name.find(".IO_sdram_dq[12]") != std::string::npos ||
+           (name.find("gen_sdram_dq_iob[12]") != std::string::npos &&
+            name.find(".u_sdram_dq_iobuf") != std::string::npos);
+}
+
 static bool is_r56_fabric_dq_iobuf(const Context *ctx, const CellInfo &ci)
 {
     // R56 "Path-B" (suppress the unrealizable GW5A pad-IOLOGIC input
@@ -649,6 +666,72 @@ void GowinPacker::pack_io_regs(void)
                 log_info(" NOIOBFF attribute at %s. Skipping FF placement.\n", ctx->nameOf(&ci));
             }
             continue;
+        }
+
+        // EXP_HH DQ[12] placement-perturbation probe (codex job 6c55f8d5,
+        // 2026-05-21). Env-gated by EXP_HH_DQ12_PLACE_BEL=<bel_name>, e.g.
+        // EXP_HH_DQ12_PLACE_BEL=X3Y34/DFF4 to lock the capture FF to a
+        // DIFFERENT slot pair in the same tile. Default OFF -> baseline
+        // 2eb1dd7b reproduces unchanged.
+        if (is_sdram_dq12_iobuf(ctx, ci) && ci.getPort(id_O) != nullptr) {
+            const char *target_bel_str = getenv("EXP_HH_DQ12_PLACE_BEL");
+            if (target_bel_str != nullptr && target_bel_str[0] != '\0') {
+                NetInfo *o_net = ci.ports.at(id_O).net;
+                if (o_net != nullptr) {
+                    CellInfo *target_ff = nullptr;
+                    for (auto &usr : o_net->users) {
+                        CellInfo *u = usr.cell;
+                        if (u == nullptr)
+                            continue;
+                        if (u->type.in(id_DFFCE, id_DFFRE, id_DFFE, id_DFF, id_DFFSE, id_DFFPE) &&
+                            usr.port == id_D) {
+                            target_ff = u;
+                            break;
+                        }
+                        // hop through a single LUT4 buffer (BUFLUT or R76G msink)
+                        if (u->type == id_LUT4 && (usr.port == id_I0 || usr.port == id_I3)) {
+                            NetInfo *f_net = u->getPort(id_F);
+                            if (f_net != nullptr) {
+                                for (auto &usr2 : f_net->users) {
+                                    if (usr2.cell != nullptr &&
+                                        usr2.cell->type.in(id_DFFCE, id_DFFRE, id_DFFE, id_DFF,
+                                                            id_DFFSE, id_DFFPE) &&
+                                        usr2.port == id_D) {
+                                        target_ff = usr2.cell;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if (target_ff != nullptr)
+                            break;
+                    }
+                    if (target_ff != nullptr) {
+                        BelId target_bel = ctx->getBelByNameStr(target_bel_str);
+                        if (target_bel == BelId()) {
+                            log_warning("EXP_HH_DQ12_PLACE_BEL=%s: BEL not found in chipdb; skipping.\n",
+                                        target_bel_str);
+                        } else if (!ctx->checkBelAvail(target_bel)) {
+                            log_warning("EXP_HH_DQ12_PLACE_BEL=%s: %s already taken by %s; skipping.\n",
+                                        target_bel_str, target_bel_str,
+                                        ctx->nameOf(ctx->getBoundBelCell(target_bel)));
+                        } else if (target_ff->bel != BelId()) {
+                            log_warning("EXP_HH_DQ12_PLACE_BEL=%s: target FF %s already bound to %s; "
+                                        "skipping.\n",
+                                        target_bel_str, ctx->nameOf(target_ff),
+                                        ctx->nameOfBel(target_ff->bel));
+                        } else {
+                            ctx->bindBel(target_bel, target_ff, PlaceStrength::STRENGTH_LOCKED);
+                            log_info("  EXP_HH_DQ12_PLACE_BEL=%s: locked DQ[12] capture FF %s to %s "
+                                     "(bindBel).\n",
+                                     target_bel_str, ctx->nameOf(target_ff), target_bel_str);
+                        }
+                    } else {
+                        log_warning("EXP_HH_DQ12_PLACE_BEL=%s: could not find a downstream DFF for %s.\n",
+                                    target_bel_str, ctx->nameOf(&ci));
+                    }
+                }
+            }
         }
 
         // In the case of placing multiple registers in the IO it should be
