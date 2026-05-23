@@ -734,6 +734,63 @@ void GowinPacker::pack_io_regs(void)
             }
         }
 
+        // EXP_HH DQ[12] OEN pip-lock (codex job c9d2a8f1, 2026-05-23). Env-gated
+        // by EXP_HH_DQ12_OEN_PIP_LOCK=1, default OFF -> baseline byte-identical.
+        //
+        // 3-way fs-decode diff (Gowin vs OFF vs IOLOGIC-migrated OSS) at R37C4
+        // (apicula 1-indexed = grid[36][3] = DQ[12]'s IOB tile X3Y36) found:
+        //   Gowin:   R37C4_C1 = R37C5_W10       (RIGHT-NEIGHBOR tile, works)
+        //   OFF:     R37C4_C1 = R37C4_S26       (local, broken)
+        //   IOLOGIC: R37C4_C1 = R37C4_S24       (local, broken)
+        // C1 is IOBUF.OEN. The OE timing controls bus turnaround during SDRAM
+        // reads. Wrong-route OEN -> IOB drives during read window -> contention
+        // -> DQ[12] reads garbage. apicula chipdb: pip "E100 -> C1" encoded by
+        // bits (4, 43) and (4, 50) at this tile; "E100" is the canonical name
+        // for the wire that is aliased with R37C5_W10 across the tile boundary.
+        //
+        // Fix: explicitly bind the E100->C1 pip to DQ[12]'s OEN net at pack
+        // time, before the router runs. Must run BEFORE the IOLOGIC/TREG block
+        // below (line ~749+) which disconnects IOBUF.OEN -- otherwise oen_net
+        // is gone by the time we try to bind it.
+        // DEBUG: unconditional probe to verify env propagation reaches nextpnr
+        {
+            const char *probe = getenv("EXP_HH_DQ12_OEN_PIP_LOCK");
+            if (probe != nullptr && probe[0] != '\0' && is_sdram_dq12_iobuf(ctx, ci)) {
+                log_info("  EXP_HH_DQ12_OEN_PIP_LOCK probe: env=\"%s\" cell=%s "
+                         "type=%s has_OEN=%d\n",
+                         probe, ctx->nameOf(&ci), ci.type.c_str(ctx),
+                         ci.getPort(id_OEN) != nullptr ? 1 : 0);
+            }
+        }
+        if (is_sdram_dq12_iobuf(ctx, ci) &&
+            r56_env_enabled("EXP_HH_DQ12_OEN_PIP_LOCK") &&
+            ci.getPort(id_OEN) != nullptr) {
+            NetInfo *oen_net = ci.ports.at(id_OEN).net;
+            if (oen_net == nullptr) {
+                log_warning("EXP_HH_DQ12_OEN_PIP_LOCK: DQ[12] OEN port has no net; "
+                            "skipping (baseline preserved).\n");
+            } else {
+                IdString tile_name = ctx->id("X3Y36");
+                IdStringList pip_name = IdStringList::concat(
+                        IdStringList::concat(tile_name, ctx->id("C1")),
+                        ctx->id("E100"));
+                PipId pip = ctx->getPipByName(pip_name);
+                if (pip == PipId()) {
+                    log_warning("EXP_HH_DQ12_OEN_PIP_LOCK: pip X3Y36/C1/E100 not "
+                                "found in chipdb; skipping.\n");
+                } else if (!ctx->checkPipAvail(pip)) {
+                    log_warning("EXP_HH_DQ12_OEN_PIP_LOCK: pip X3Y36/C1/E100 not "
+                                "available (already taken); skipping.\n");
+                } else {
+                    ctx->bindPip(pip, oen_net, PlaceStrength::STRENGTH_LOCKED);
+                    log_info("  EXP_HH_DQ12_OEN_PIP_LOCK: locked pip X3Y36/C1/E100 "
+                             "for DQ[12] IOBUF OEN net %s (matches Gowin twin's "
+                             "R37C4_C1 = R37C5_W10 routing — the OEN-routing fix).\n",
+                             ctx->nameOf(oen_net));
+                }
+            }
+        }
+
         // In the case of placing multiple registers in the IO it should be
         // noted that the CLK, ClockEnable and LocalSetReset nets must
         // match.
@@ -801,6 +858,30 @@ void GowinPacker::pack_io_regs(void)
                         ff->movePortTo(port_name, dq12_iologic,
                                        port_name != id_Q ? port_name : id_Q4);
                     }
+
+                    // Codex review (job b3c8e1f4, 2026-05-23): mirror the
+                    // generic "input reg in IO" path's packer-state setup so
+                    // the rest of pack_io_regs() (output-reg / tri-state-reg
+                    // coordination) treats this DQ[12] IOLOGIC the same as a
+                    // generic IOBFF-attribute IOLOGIC. Without these, later
+                    // OREG/TREG packing decisions don't see this cell as the
+                    // input half of the IOB cluster, which can drop control
+                    // -set coherency checks and leave intra-tile pip routes
+                    // unsteered. iologic_i / clk_net / ce_net / lsr_net /
+                    // reg_type are declared at the top of this loop iteration
+                    // (line ~740-746) and consumed by the generic packer
+                    // blocks lower in pack_io_regs().
+                    iologic_i = dq12_iologic;
+                    clk_net = dq12_iologic->getPort(id_CLK);
+                    ce_net = dq12_iologic->getPort(id_CE);
+                    lsr_net = nullptr;
+                    for (IdString lsr_port : {id_SET, id_RESET, id_PRESET, id_CLEAR}) {
+                        lsr_net = dq12_iologic->getPort(lsr_port);
+                        if (lsr_net != nullptr)
+                            break;
+                    }
+                    reg_type = ff->type;
+
                     dq12_iologic->setAttr(id_HAS_REG, 1);
                     dq12_iologic->setAttr(id_IREG_TYPE, ff_type);
                     cells_to_remove.push_back(ff->name);
@@ -972,6 +1053,45 @@ void GowinPacker::pack_io_regs(void)
             }
         }
         (void)dq12_iologic_migrated;
+
+        // EXP_HH DQ[12] fabric-FF placement-force (2026-05-23 placement-asymmetry
+        // discovery). Env-gated EXP_HH_DQ12_FORCE_FF_BEL=<bel-string>, default OFF.
+        //
+        // OFF-baseline pnr.json fingerprint discovery: DQ[12] (broken) and DQ[13]
+        // (working) share IOB tile X3Y36 (IOBA + IOBB) and CLK net 91720 and
+        // identical .cst (LVCMOS33 / PULL=NONE / DRIVE=8). BUT their fabric capture
+        // FFs land at DIFFERENT bels: DQ[12] -> X4Y35/DFF3 (one column over from
+        // its IOB); DQ[13] -> X3Y35/DFF2 (directly below its IOB). The other 14
+        // working DQ pins' FFs are placed in the column directly-inward-from their
+        // IOB. The DQ[12] one-column-over placement is the placer's free choice;
+        // no constraint forces it. Hypothesis: pinning DQ[12]'s capture FF to a
+        // slot at X3Y35 (matching the natural column-of-the-IOB pattern that the
+        // working DQ[13] uses) may shift the data-arrival timing back into the
+        // SDRAM valid window. This is the first test that ATTACKS THE PLACEMENT
+        // LAYER directly rather than the IOB fuse layer (which 25+ R36C3-focused
+        // iterations have shown is 0.00% of the total chip diff and produces
+        // identical wrong HW readings regardless of fuse content).
+        if (!dq12_iologic_migrated && is_sdram_dq12_iobuf(ctx, ci) &&
+            ci.getPort(id_O) != nullptr) {
+            const char *force_bel = getenv("EXP_HH_DQ12_FORCE_FF_BEL");
+            if (force_bel != nullptr && force_bel[0] != '\0') {
+                NetInfo *o_net = ci.ports.at(id_O).net;
+                CellInfo *ff = (o_net != nullptr)
+                        ? net_only_drives(ctx, o_net, is_ff, id_D) : nullptr;
+                if (ff == nullptr) {
+                    log_warning("EXP_HH_DQ12_FORCE_FF_BEL: DQ[12] O-net has no "
+                                "single fabric capture FF; skipping (baseline "
+                                "preserved).\n");
+                } else {
+                    ff->setAttr(id_BEL, Property(std::string(force_bel)));
+                    log_info("  EXP_HH_DQ12_FORCE_FF_BEL: pinned DQ[12] capture "
+                             "FF %s to bel %s (placement-asymmetry experiment: "
+                             "DQ[13] = X3Y35/DFF2, DQ[12] default = X4Y35/DFF3; "
+                             "test whether matching the IOB column fixes the read).\n",
+                             ctx->nameOf(ff), force_bel);
+                }
+            }
+        }
 
         // EXP_HH DQ[12] fabric-path input IODELAY (overnight timing fix,
         // 2026-05-23). Env-gated EXP_HH_DQ12_IODELAY_FAB=<C_STATIC_DLY>,
