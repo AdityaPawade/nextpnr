@@ -808,6 +808,20 @@ void GowinPacker::pack_io_regs(void)
                              "IOLOGICI_EMPTY %s (HAS_REG=1, IREG_TYPE=%s) -- input register "
                              "only, no OREG/TREG.\n",
                              ctx->nameOf(ff), ctx->nameOf(dq12_iologic), ff_type.c_str());
+                    // Option 2A++: optional IODELAY tap on the IOLOGIC cell.
+                    // Combines iter9 fuse fix (bit-28 fix) with variable input-delay tap
+                    // to potentially recover bit-12 (beat-A) sampling.
+                    const char *iodly_env = getenv("EXP_HH_DQ12_IOLOGIC_IODELAY");
+                    if (iodly_env != nullptr && *iodly_env != '\0') {
+                        int dly_val = atoi(iodly_env);
+                        if (dly_val < 0) dly_val = 0;
+                        if (dly_val > 127) dly_val = 127;
+                        dq12_iologic->setAttr(id_IODELAY, Property("IN"));
+                        dq12_iologic->setParam(id_C_STATIC_DLY, Property(dly_val, 32));
+                        log_info("  EXP_HH_DQ12_IOLOGIC_IODELAY=%d: added IODELAY=IN with "
+                                 "C_STATIC_DLY=%d to %s.\n",
+                                 dly_val, dly_val, ctx->nameOf(dq12_iologic));
+                    }
                 }
             }
         }
