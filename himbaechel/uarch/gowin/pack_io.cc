@@ -795,30 +795,13 @@ void GowinPacker::pack_io_regs(void)
                     auto iologic_cell = gwu.create_cell(iologic_name, id_IOLOGICI_EMPTY);
                     new_cells.push_back(std::move(iologic_cell));
                     CellInfo *dq12_iologic = new_cells.back().get();
-                    // iter30 (2026-05-25, default ON): structural minimal CE disconnect.
-                    // Gowin's working .fs shows R37C4_CE0 = VCC (register always-enabled).
-                    // OSS's R37C4_CE0 = R37C5_W21 (gated by external signal -> register
-                    // MISSES capture cycles -> bit-28/beat-B wrong). The migrated FF brings
-                    // its CE port into the IOLOGIC; apicula then routes the local W21 signal
-                    // through CE0 PIP. By disconnecting CE BEFORE port migration, the
-                    // IOLOGIC's CE port stays undriven, so apicula writes no CE0 PIP
-                    // override and CE0 falls back to chipdb default (VCC).
-                    //
-                    // Codex-converged (v3 2026-05-25): "smallest reversible change that
-                    // avoids known-bad CEIMUX_1=1 fuse (31,16). Iter26 added VCC net
-                    // reconnect → broke SDRAM (BTSZ:200RT). Iter29 added apicula
-                    // CEIMUX_1=1 → broke DQ[13]+DQ[14]. iter30 disconnect-only avoids
-                    // both failure modes — net effect: leave CE port absent on IOLOGIC."
-                    //
-                    // Scope: this block is already gated by is_sdram_dq12_iobuf() so
-                    // affects ONLY R37C4 IOLOGICA. DQ[13] IOLOGICB is untouched.
-                    if (ff->getPort(id_CE) != nullptr) {
-                        ff->disconnectPort(id_CE);
-                        log_info("  iter30 DQ[12]: disconnected FF.CE before IOLOGIC "
-                                 "migration (target encoding: CE0=VCC default).\n");
-                    } else {
-                        log_info("  iter30 DQ[12]: FF.CE already disconnected (no-op).\n");
-                    }
+                    // iter31 (2026-05-25): the CE-disconnect approach (iter30) was HW-disproven.
+                    // iter30 HW: F:10002000 (DQ[12] beat-B still wrong AND DQ[13] beat-A broke).
+                    // The disconnect re-routed the shared CE net via the router, causing
+                    // collateral on DQ[13]. iter31 reverts to the simplest IOLOGIC
+                    // migration — moves ALL ports including CE into the IOLOGIC unchanged.
+                    // Goal: keep bit-12 fix (IOLOGIC migration) without breaking DQ[13].
+                    // Expected: bit-12 fixed, bit-13 OK, bit-28 still wrong (= F:10000000).
                     for (auto &port : ff->ports) {
                         IdString port_name = port.first;
                         ff->movePortTo(port_name, dq12_iologic,
