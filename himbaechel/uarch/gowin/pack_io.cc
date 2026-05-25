@@ -822,6 +822,55 @@ void GowinPacker::pack_io_regs(void)
                                  "C_STATIC_DLY=%d to %s.\n",
                                  dly_val, dly_val, ctx->nameOf(dq12_iologic));
                     }
+                    // 2026-05-25: STRUCTURAL multi-FF placement chain. After
+                    // migrating the FIRST FF into IOLOGIC, walk downstream
+                    // and BEL-lock the next 1-3 FFs to fabric BELs IMMEDIATELY
+                    // adjacent to the IOB (X3Y34/35 LOGIC tile slots) to
+                    // minimize wire delays through the corner. User mandate:
+                    // get all DQ[12] read-path FFs as close to IOLOGIC as
+                    // possible. Enable via EXP_HH_DQ12_CHAIN_LOCK=1.
+                    if (getenv("EXP_HH_DQ12_CHAIN_LOCK") != nullptr &&
+                        std::string(getenv("EXP_HH_DQ12_CHAIN_LOCK")) == "1") {
+                        // Walk downstream from IOLOGIC.Q4 net
+                        NetInfo *q4_net = dq12_iologic->getPort(id_Q4);
+                        std::vector<CellInfo*> chain_ffs;
+                        NetInfo *cur_net = q4_net;
+                        for (int depth = 0; depth < 3 && cur_net != nullptr; depth++) {
+                            CellInfo *next_ff = net_only_drives(ctx, cur_net, is_ff, id_D);
+                            if (next_ff == nullptr) break;
+                            chain_ffs.push_back(next_ff);
+                            cur_net = next_ff->getPort(id_Q);
+                        }
+                        // Lock chain FFs to X3Y34 DFFs (LOGIC tile directly below R37C4 IOB)
+                        const char *lock_bels[] = {
+                            "X3Y34/DFF0", "X3Y34/DFF1", "X3Y34/DFF2",
+                            "X3Y34/DFF3", "X3Y34/DFF4", "X3Y34/DFF5",
+                        };
+                        for (size_t i = 0; i < chain_ffs.size() && i < 6; i++) {
+                            CellInfo *cff = chain_ffs[i];
+                            BelId tbel = ctx->getBelByNameStr(lock_bels[i]);
+                            if (tbel == BelId()) {
+                                log_warning("  CHAIN_LOCK: BEL %s not found, skipping FF #%zu.\n",
+                                            lock_bels[i], i);
+                                continue;
+                            }
+                            if (!ctx->checkBelAvail(tbel)) {
+                                log_warning("  CHAIN_LOCK: BEL %s already taken, skipping FF #%zu.\n",
+                                            lock_bels[i], i);
+                                continue;
+                            }
+                            // BEL_STRENGTH=USER (5) to ensure placer respects it
+                            cff->setAttr(id_BEL, Property(lock_bels[i]));
+                            log_info("  EXP_HH_DQ12_CHAIN_LOCK: locked chain FF #%zu %s to %s\n",
+                                     i, ctx->nameOf(cff), lock_bels[i]);
+                        }
+                        if (chain_ffs.empty()) {
+                            log_warning("  EXP_HH_DQ12_CHAIN_LOCK: no downstream FFs found\n");
+                        } else {
+                            log_info("  EXP_HH_DQ12_CHAIN_LOCK: locked %zu chain FF(s) to X3Y34\n",
+                                     chain_ffs.size());
+                        }
+                    }
                 }
             }
         }
