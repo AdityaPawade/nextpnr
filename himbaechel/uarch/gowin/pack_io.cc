@@ -808,8 +808,31 @@ void GowinPacker::pack_io_regs(void)
                     }
                     if (force_ce_vcc) {
                         ff->disconnectPort(id_CE);
-                        log_info("  EXP_HH_DQ12_FORCE_CE_VCC=1: disconnected FF CE before "
-                                 "IOLOGIC migration (will encode as CE0=VCC like Gowin twin).\n");
+                        // Tie CE to VCC explicitly (some routers default unconnected -> low)
+                        const char *tie_mode = getenv("EXP_HH_DQ12_CE_TIE");
+                        std::string mode = (tie_mode != nullptr) ? std::string(tie_mode) : std::string("vcc");
+                        if (mode == "vcc") {
+                            NetInfo *vcc_net = ctx->nets.count(ctx->id("$PACKER_VCC_NET")) ?
+                                ctx->nets.at(ctx->id("$PACKER_VCC_NET")).get() : nullptr;
+                            if (vcc_net == nullptr) {
+                                // Try common alternate names
+                                for (const char *name : {"$nextpnr_vcc_net", "VCC", "vcc"}) {
+                                    auto it = ctx->nets.find(ctx->id(name));
+                                    if (it != ctx->nets.end()) { vcc_net = it->second.get(); break; }
+                                }
+                            }
+                            if (vcc_net != nullptr) {
+                                ff->connectPort(id_CE, vcc_net);
+                                log_info("  EXP_HH_DQ12_FORCE_CE_VCC=1 EXP_HH_DQ12_CE_TIE=vcc: "
+                                         "connected FF CE to VCC net (%s).\n", ctx->nameOf(vcc_net));
+                            } else {
+                                log_warning("  EXP_HH_DQ12_FORCE_CE_VCC=1: no VCC net found; "
+                                            "leaving CE disconnected.\n");
+                            }
+                        } else {
+                            log_info("  EXP_HH_DQ12_FORCE_CE_VCC=1 EXP_HH_DQ12_CE_TIE=%s: "
+                                     "disconnected FF CE (default).\n", mode.c_str());
+                        }
                     }
                     for (auto &port : ff->ports) {
                         IdString port_name = port.first;
