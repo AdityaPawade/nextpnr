@@ -801,10 +801,13 @@ void GowinPacker::pack_io_regs(void)
                     // capture cycles -> bit-12/beat-A wrong). Fix: disconnect FF's CE before
                     // moving ports into IOLOGIC, so IOLOGIC's CE is unconnected -> apicula
                     // encodes CE0=VCC like Gowin.
-                    bool force_ce_vcc = true;
+                    // Default OFF: 2026-05-25 HW tests (iter26/29) showed paired
+                    // apicula CEIMUX_1=1 breaks DQ[13]. Keep flag for future deeper
+                    // investigation; nextpnr CE disconnect alone has no fuse effect.
+                    bool force_ce_vcc = false;
                     const char *force_ce_env = getenv("EXP_HH_DQ12_FORCE_CE_VCC");
-                    if (force_ce_env != nullptr && std::string(force_ce_env) == "0") {
-                        force_ce_vcc = false;
+                    if (force_ce_env != nullptr && std::string(force_ce_env) == "1") {
+                        force_ce_vcc = true;
                     }
                     if (force_ce_vcc) {
                         ff->disconnectPort(id_CE);
