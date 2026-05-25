@@ -812,14 +812,10 @@ void GowinPacker::pack_io_regs(void)
                         const char *tie_mode = getenv("EXP_HH_DQ12_CE_TIE");
                         std::string mode = (tie_mode != nullptr) ? std::string(tie_mode) : std::string("vcc");
                         if (mode == "vcc") {
-                            NetInfo *vcc_net = ctx->nets.count(ctx->id("$PACKER_VCC_NET")) ?
-                                ctx->nets.at(ctx->id("$PACKER_VCC_NET")).get() : nullptr;
-                            if (vcc_net == nullptr) {
-                                // Try common alternate names
-                                for (const char *name : {"$nextpnr_vcc_net", "VCC", "vcc"}) {
-                                    auto it = ctx->nets.find(ctx->id(name));
-                                    if (it != ctx->nets.end()) { vcc_net = it->second.get(); break; }
-                                }
+                            NetInfo *vcc_net = nullptr;
+                            for (const char *name : {"$PACKER_VCC", "$PACKER_VCC_NET", "$nextpnr_vcc_net", "VCC", "vcc"}) {
+                                auto it = ctx->nets.find(ctx->id(name));
+                                if (it != ctx->nets.end()) { vcc_net = it->second.get(); break; }
                             }
                             if (vcc_net != nullptr) {
                                 ff->connectPort(id_CE, vcc_net);
