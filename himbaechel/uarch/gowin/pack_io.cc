@@ -795,43 +795,29 @@ void GowinPacker::pack_io_regs(void)
                     auto iologic_cell = gwu.create_cell(iologic_name, id_IOLOGICI_EMPTY);
                     new_cells.push_back(std::move(iologic_cell));
                     CellInfo *dq12_iologic = new_cells.back().get();
-                    // CE disconnect (Fix #1, gated by EXP_HH_DQ12_FORCE_CE_VCC=1, default ON for IOLOGIC mode):
+                    // iter30 (2026-05-25, default ON): structural minimal CE disconnect.
                     // Gowin's working .fs shows R37C4_CE0 = VCC (register always-enabled).
-                    // OSS's R37C4_CE0 = R37C5_W21 (gated by external signal -> register MISSES
-                    // capture cycles -> bit-12/beat-A wrong). Fix: disconnect FF's CE before
-                    // moving ports into IOLOGIC, so IOLOGIC's CE is unconnected -> apicula
-                    // encodes CE0=VCC like Gowin.
-                    // Default OFF: 2026-05-25 HW tests (iter26/29) showed paired
-                    // apicula CEIMUX_1=1 breaks DQ[13]. Keep flag for future deeper
-                    // investigation; nextpnr CE disconnect alone has no fuse effect.
-                    bool force_ce_vcc = false;
-                    const char *force_ce_env = getenv("EXP_HH_DQ12_FORCE_CE_VCC");
-                    if (force_ce_env != nullptr && std::string(force_ce_env) == "1") {
-                        force_ce_vcc = true;
-                    }
-                    if (force_ce_vcc) {
+                    // OSS's R37C4_CE0 = R37C5_W21 (gated by external signal -> register
+                    // MISSES capture cycles -> bit-28/beat-B wrong). The migrated FF brings
+                    // its CE port into the IOLOGIC; apicula then routes the local W21 signal
+                    // through CE0 PIP. By disconnecting CE BEFORE port migration, the
+                    // IOLOGIC's CE port stays undriven, so apicula writes no CE0 PIP
+                    // override and CE0 falls back to chipdb default (VCC).
+                    //
+                    // Codex-converged (v3 2026-05-25): "smallest reversible change that
+                    // avoids known-bad CEIMUX_1=1 fuse (31,16). Iter26 added VCC net
+                    // reconnect → broke SDRAM (BTSZ:200RT). Iter29 added apicula
+                    // CEIMUX_1=1 → broke DQ[13]+DQ[14]. iter30 disconnect-only avoids
+                    // both failure modes — net effect: leave CE port absent on IOLOGIC."
+                    //
+                    // Scope: this block is already gated by is_sdram_dq12_iobuf() so
+                    // affects ONLY R37C4 IOLOGICA. DQ[13] IOLOGICB is untouched.
+                    if (ff->getPort(id_CE) != nullptr) {
                         ff->disconnectPort(id_CE);
-                        // Tie CE to VCC explicitly (some routers default unconnected -> low)
-                        const char *tie_mode = getenv("EXP_HH_DQ12_CE_TIE");
-                        std::string mode = (tie_mode != nullptr) ? std::string(tie_mode) : std::string("vcc");
-                        if (mode == "vcc") {
-                            NetInfo *vcc_net = nullptr;
-                            for (const char *name : {"$PACKER_VCC", "$PACKER_VCC_NET", "$nextpnr_vcc_net", "VCC", "vcc"}) {
-                                auto it = ctx->nets.find(ctx->id(name));
-                                if (it != ctx->nets.end()) { vcc_net = it->second.get(); break; }
-                            }
-                            if (vcc_net != nullptr) {
-                                ff->connectPort(id_CE, vcc_net);
-                                log_info("  EXP_HH_DQ12_FORCE_CE_VCC=1 EXP_HH_DQ12_CE_TIE=vcc: "
-                                         "connected FF CE to VCC net (%s).\n", ctx->nameOf(vcc_net));
-                            } else {
-                                log_warning("  EXP_HH_DQ12_FORCE_CE_VCC=1: no VCC net found; "
-                                            "leaving CE disconnected.\n");
-                            }
-                        } else {
-                            log_info("  EXP_HH_DQ12_FORCE_CE_VCC=1 EXP_HH_DQ12_CE_TIE=%s: "
-                                     "disconnected FF CE (default).\n", mode.c_str());
-                        }
+                        log_info("  iter30 DQ[12]: disconnected FF.CE before IOLOGIC "
+                                 "migration (target encoding: CE0=VCC default).\n");
+                    } else {
+                        log_info("  iter30 DQ[12]: FF.CE already disconnected (no-op).\n");
                     }
                     for (auto &port : ff->ports) {
                         IdString port_name = port.first;
