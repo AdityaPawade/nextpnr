@@ -795,6 +795,22 @@ void GowinPacker::pack_io_regs(void)
                     auto iologic_cell = gwu.create_cell(iologic_name, id_IOLOGICI_EMPTY);
                     new_cells.push_back(std::move(iologic_cell));
                     CellInfo *dq12_iologic = new_cells.back().get();
+                    // CE disconnect (Fix #1, gated by EXP_HH_DQ12_FORCE_CE_VCC=1, default ON for IOLOGIC mode):
+                    // Gowin's working .fs shows R37C4_CE0 = VCC (register always-enabled).
+                    // OSS's R37C4_CE0 = R37C5_W21 (gated by external signal -> register MISSES
+                    // capture cycles -> bit-12/beat-A wrong). Fix: disconnect FF's CE before
+                    // moving ports into IOLOGIC, so IOLOGIC's CE is unconnected -> apicula
+                    // encodes CE0=VCC like Gowin.
+                    bool force_ce_vcc = true;
+                    const char *force_ce_env = getenv("EXP_HH_DQ12_FORCE_CE_VCC");
+                    if (force_ce_env != nullptr && std::string(force_ce_env) == "0") {
+                        force_ce_vcc = false;
+                    }
+                    if (force_ce_vcc) {
+                        ff->disconnectPort(id_CE);
+                        log_info("  EXP_HH_DQ12_FORCE_CE_VCC=1: disconnected FF CE before "
+                                 "IOLOGIC migration (will encode as CE0=VCC like Gowin twin).\n");
+                    }
                     for (auto &port : ff->ports) {
                         IdString port_name = port.first;
                         ff->movePortTo(port_name, dq12_iologic,
