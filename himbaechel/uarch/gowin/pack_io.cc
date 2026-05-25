@@ -841,10 +841,12 @@ void GowinPacker::pack_io_regs(void)
                             chain_ffs.push_back(next_ff);
                             cur_net = next_ff->getPort(id_Q);
                         }
-                        // Lock chain FFs to X3Y34 DFFs (LOGIC tile directly below R37C4 IOB)
+                        // Lock chain FFs to X3Y34/X3Y35 DFFs (LOGIC tiles directly below
+                        // R37C4 IOB). Skip DFF1 (sometimes typed as plain DFF, not DFFRE);
+                        // use DFF0/DFF2 etc which are confirmed DFFRE-compatible.
                         const char *lock_bels[] = {
-                            "X3Y34/DFF0", "X3Y34/DFF1", "X3Y34/DFF2",
-                            "X3Y34/DFF3", "X3Y34/DFF4", "X3Y34/DFF5",
+                            "X3Y34/DFF0", "X3Y34/DFF2", "X3Y34/DFF4",
+                            "X3Y35/DFF2", "X3Y35/DFF4", "X3Y35/DFF6",
                         };
                         for (size_t i = 0; i < chain_ffs.size() && i < 6; i++) {
                             CellInfo *cff = chain_ffs[i];
