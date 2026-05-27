@@ -604,10 +604,28 @@ def create_switch_matrix(tt: TileType, db: chipdb, x: int, y: int):
             return "LW_TAP"
         return ""
 
+    # 2026-05-27 iter62 LSR-LB-only filter (env-gated).
+    # Gowin EDA twin builds use ~89% LB-line sources for LSR (DFFRE/DFFCE RESET) pins.
+    # OSS toolchain currently uses 0% LB and 100% general-fabric (N27/S27/E27/W21/E21).
+    # Hypothesis: physical LSR mux on GW5A LSlices works correctly only with LB sources;
+    # general-fabric routing encodes valid fuses but silicon ignores them, leaving LSR
+    # pulled to a default that holds the FF in perpetual reset → entire synth-repro FSM
+    # and many DFFRE stickies fail to advance. See lsr_root_cause_brief.md (codex r1).
+    # Gate: GW5A_LSR_LB_ONLY=1 enables filter; default OFF preserves upstream behavior.
+    import os as _os_lsr
+    _lsr_lb_only = _os_lsr.environ.get('GW5A_LSR_LB_ONLY', '0') in {'1', 'true', 'yes', 'on'}
+    _lsr_filtered = 0
     for dst, srcs in db[y, x].pips.items():
         if not tt.has_wire(dst):
             tt.create_wire(dst, get_wire_type(dst))
         for src in srcs.keys():
+            # LSR-LB filter: drop non-LB sources targeting LSR0/LSR1/LSR2/LSR3 pins.
+            if (_lsr_lb_only and
+                    isinstance(dst, str) and dst.startswith('LSR') and
+                    len(dst) > 3 and dst[3].isdigit() and
+                    isinstance(src, str) and not src.startswith('LB')):
+                _lsr_filtered += 1
+                continue
             assert src in db.wire_delay, f"No timing info for {src} wire"
             if not tt.has_wire(src):
                 if src in {"VSS", "VCC"}:
@@ -615,6 +633,9 @@ def create_switch_matrix(tt: TileType, db: chipdb, x: int, y: int):
                 else:
                     tt.create_wire(src, get_wire_type(src))
             tt.create_pip(src, dst, get_tm_class(db, src))
+    if _lsr_lb_only and _lsr_filtered and (x, y) == (5, 14):
+        # one-line breadcrumb on first filtered tile so we know the patch ran during BBA gen
+        print(f"  [GW5A_LSR_LB_ONLY] filtered {_lsr_filtered} non-LB->LSR pips at first LSlice tile ({x},{y})")
 
     # clock wires
     # always mark clock wires with location flag
