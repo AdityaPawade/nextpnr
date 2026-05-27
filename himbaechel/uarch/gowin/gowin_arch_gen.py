@@ -619,10 +619,13 @@ def create_switch_matrix(tt: TileType, db: chipdb, x: int, y: int):
         if not tt.has_wire(dst):
             tt.create_wire(dst, get_wire_type(dst))
         for src in srcs.keys():
-            # LSR-LB filter: drop non-LB sources targeting LSR0/LSR1/LSR2/LSR3 pins.
+            # LSR-LB filter: drop non-LB sources targeting LSR0/LSR1 pins ONLY.
+            # LSR0/LSR1 (slots 0+1) = sync RESET on DFFRE — Gowin twin uses 89% LB lines.
+            # LSR2/LSR3 (slots 2+3) = async CLEAR on DFFC — Gowin twin uses general fabric.
+            # (Confirmed by iter62a route() failure at X81Y3/LSR2: filtering LSR2 broke routability.)
             if (_lsr_lb_only and
                     isinstance(dst, str) and dst.startswith('LSR') and
-                    len(dst) > 3 and dst[3].isdigit() and
+                    len(dst) > 3 and dst[3] in ('0', '1') and
                     isinstance(src, str) and not src.startswith('LB')):
                 _lsr_filtered += 1
                 continue
