@@ -611,6 +611,16 @@ static bool is_sdram_dq12_iobuf(const Context *ctx, const CellInfo &ci)
             name.find(".u_sdram_dq_iobuf") != std::string::npos);
 }
 
+static bool is_sdram_dq14_iobuf(const Context *ctx, const CellInfo &ci)
+{
+    if (ci.type != id_IOBUF)
+        return false;
+    std::string name = ci.name.str(ctx);
+    return name.find(".IO_sdram_dq[14]") != std::string::npos ||
+           (name.find("gen_sdram_dq_iob[14]") != std::string::npos &&
+            name.find(".u_sdram_dq_iobuf") != std::string::npos);
+}
+
 static bool is_r56_fabric_dq_iobuf(const Context *ctx, const CellInfo &ci)
 {
     // R56 "Path-B" (suppress the unrealizable GW5A pad-IOLOGIC input
@@ -768,33 +778,63 @@ void GowinPacker::pack_io_regs(void)
         // encoder fix (apicula 834622f) closed that gap, so apicula can
         // now write the complete IOLOGICI_EMPTY+HAS_REG fuse set.
         //
-        // Scope: DQ[12] ONLY, INPUT register ONLY (no OREG/TREG migration).
+        // Scope: selected SDRAM-DQ corner bits only, INPUT register ONLY
+        // (no OREG/TREG migration). DQ[12] is the old bit-28 experiment;
+        // DQ[14] is the real EXP_HH instruction-fetch bit-14 corruption
+        // at ball B2 / R37C4_IOA.
         // Placed BEFORE the r76G synthetic-multi-sink block so the
         // single-fanout O net is intact for net_only_drives(). On success
         // the fabric FF becomes an IOLOGICI_EMPTY cell (no longer is_ff),
         // so the r76G / r56 / generic-806 / generic-868 blocks below all
-        // naturally skip DQ[12] -> no edits to those blocks are needed.
-        bool dq12_iologic_migrated = false;
-        if (is_sdram_dq12_iobuf(ctx, ci) && r56_env_enabled("EXP_HH_DQ12_IOLOGIC") &&
-            ci.getPort(id_O) != nullptr) {
+        // naturally skip the migrated DQ bit -> no edits to those blocks are needed.
+        bool dq_iologic_migrated = false;
+        bool is_dq12_iologic_target = is_sdram_dq12_iobuf(ctx, ci);
+        bool is_dq14_iologic_target = is_sdram_dq14_iobuf(ctx, ci);
+        const char *dq_iologic_env = is_dq12_iologic_target ? "EXP_HH_DQ12_IOLOGIC" :
+                                     is_dq14_iologic_target ? "EXP_HH_DQ14_IOLOGIC" : nullptr;
+        int dq_iologic_index = is_dq14_iologic_target ? 14 : 12;
+        if (dq_iologic_env != nullptr && r56_env_enabled(dq_iologic_env) && ci.getPort(id_O) != nullptr) {
             NetInfo *o_net = ci.ports.at(id_O).net;
             CellInfo *ff = (o_net != nullptr) ? net_only_drives(ctx, o_net, is_ff, id_D) : nullptr;
+            CellInfo *dq14_bypass_lut = nullptr;
+            NetInfo *dq14_bypass_net = nullptr;
+            if (ff == nullptr && is_dq14_iologic_target && o_net != nullptr && o_net->users.entries() == 1) {
+                for (auto &usr : o_net->users) {
+                    CellInfo *lut = usr.cell;
+                    if (usr.port != id_I3 || lut == nullptr || lut->type != id_LUT4 || !lut->params.count(id_INIT))
+                        continue;
+                    NetInfo *lut_f_net = lut->getPort(id_F);
+                    if (lut->params.at(id_INIT).as_int64() == 0xff00 && lut_f_net != nullptr &&
+                        lut_f_net->users.entries() == 1) {
+                        CellInfo *lut_ff = net_only_drives(ctx, lut_f_net, is_ff, id_D);
+                        if (lut_ff != nullptr) {
+                            dq14_bypass_lut = lut;
+                            dq14_bypass_net = lut_f_net;
+                            ff = lut_ff;
+                        }
+                    }
+                }
+            }
             if (ff == nullptr) {
-                log_warning("EXP_HH_DQ12_IOLOGIC: DQ[12] O net has no single fabric capture "
-                            "FF; skipping migration (baseline preserved).\n");
-            } else if (o_net->users.entries() != 1) {
-                log_warning("EXP_HH_DQ12_IOLOGIC: DQ[12] O net is multi-sink; skipping "
-                            "migration (baseline preserved).\n");
+                log_warning("%s: DQ[%d] O net has no single fabric capture FF; skipping migration "
+                            "(baseline preserved).\n",
+                            dq_iologic_env, dq_iologic_index);
+            } else if (dq14_bypass_lut == nullptr && o_net->users.entries() != 1) {
+                log_warning("%s: DQ[%d] O net is multi-sink; skipping migration "
+                            "(baseline preserved).\n",
+                            dq_iologic_env, dq_iologic_index);
             } else {
                 BelId l_bel = get_iologici_bel(&ci);
                 if (l_bel == BelId()) {
-                    log_warning("EXP_HH_DQ12_IOLOGIC: no IOLOGICI bel for DQ[12]; skipping.\n");
+                    log_warning("%s: no IOLOGICI bel for DQ[%d]; skipping.\n",
+                                dq_iologic_env, dq_iologic_index);
                 } else {
                     std::string ff_type = ff->type.str(ctx);
-                    IdString iologic_name = gwu.create_aux_name(ci.name, 0, "_dq12_iobff$");
+                    IdString iologic_name = gwu.create_aux_name(
+                            ci.name, 0, is_dq14_iologic_target ? "_dq14_iobff$" : "_dq12_iobff$");
                     auto iologic_cell = gwu.create_cell(iologic_name, id_IOLOGICI_EMPTY);
                     new_cells.push_back(std::move(iologic_cell));
-                    CellInfo *dq12_iologic = new_cells.back().get();
+                    CellInfo *dq_iologic = new_cells.back().get();
                     // iter31 (2026-05-25): the CE-disconnect approach (iter30) was HW-disproven.
                     // iter30 HW: F:10002000 (DQ[12] beat-B still wrong AND DQ[13] beat-A broke).
                     // The disconnect re-routed the shared CE net via the router, causing
@@ -804,30 +844,45 @@ void GowinPacker::pack_io_regs(void)
                     // Expected: bit-12 fixed, bit-13 OK, bit-28 still wrong (= F:10000000).
                     for (auto &port : ff->ports) {
                         IdString port_name = port.first;
-                        ff->movePortTo(port_name, dq12_iologic,
+                        ff->movePortTo(port_name, dq_iologic,
                                        port_name != id_Q ? port_name : id_Q4);
                     }
-                    dq12_iologic->setAttr(id_HAS_REG, 1);
-                    dq12_iologic->setAttr(id_IREG_TYPE, ff_type);
+                    if (dq14_bypass_lut != nullptr) {
+                        dq_iologic->disconnectPort(id_D);
+                        dq_iologic->connectPort(id_D, o_net);
+                        dq14_bypass_lut->disconnectPort(id_I3);
+                        dq14_bypass_lut->disconnectPort(id_F);
+                        cells_to_remove.push_back(dq14_bypass_lut->name);
+                        if (dq14_bypass_net != nullptr)
+                            nets_to_remove.push_back(dq14_bypass_net->name);
+                    }
+                    dq_iologic->setAttr(id_HAS_REG, 1);
+                    dq_iologic->setAttr(id_IREG_TYPE, ff_type);
                     cells_to_remove.push_back(ff->name);
-                    dq12_iologic_migrated = true;
-                    log_info("  EXP_HH_DQ12_IOLOGIC: migrated DQ[12] capture FF %s into "
+                    dq_iologic_migrated = true;
+                    log_info("  %s: migrated DQ[%d] capture FF %s into "
                              "IOLOGICI_EMPTY %s (HAS_REG=1, IREG_TYPE=%s) -- input register "
                              "only, no OREG/TREG.\n",
-                             ctx->nameOf(ff), ctx->nameOf(dq12_iologic), ff_type.c_str());
+                             dq_iologic_env, dq_iologic_index, ctx->nameOf(ff), ctx->nameOf(dq_iologic),
+                             ff_type.c_str());
+                    if (dq14_bypass_lut != nullptr) {
+                        log_info("  %s: removed DQ[14] transparent LUT4 %s (INIT=0xff00, I3->F) "
+                                 "between IOBUF.O and IOLOGIC.D.\n",
+                                 dq_iologic_env, ctx->nameOf(dq14_bypass_lut));
+                    }
                     // Option 2A++: optional IODELAY tap on the IOLOGIC cell.
                     // Combines iter9 fuse fix (bit-28 fix) with variable input-delay tap
                     // to potentially recover bit-12 (beat-A) sampling.
-                    const char *iodly_env = getenv("EXP_HH_DQ12_IOLOGIC_IODELAY");
+                    const char *iodly_env = is_dq12_iologic_target ? getenv("EXP_HH_DQ12_IOLOGIC_IODELAY") : nullptr;
                     if (iodly_env != nullptr && *iodly_env != '\0') {
                         int dly_val = atoi(iodly_env);
                         if (dly_val < 0) dly_val = 0;
                         if (dly_val > 127) dly_val = 127;
-                        dq12_iologic->setAttr(id_IODELAY, Property("IN"));
-                        dq12_iologic->setParam(id_C_STATIC_DLY, Property(dly_val, 32));
+                        dq_iologic->setAttr(id_IODELAY, Property("IN"));
+                        dq_iologic->setParam(id_C_STATIC_DLY, Property(dly_val, 32));
                         log_info("  EXP_HH_DQ12_IOLOGIC_IODELAY=%d: added IODELAY=IN with "
                                  "C_STATIC_DLY=%d to %s.\n",
-                                 dly_val, dly_val, ctx->nameOf(dq12_iologic));
+                                 dly_val, dly_val, ctx->nameOf(dq_iologic));
                     }
                     // 2026-05-25: STRUCTURAL multi-FF placement chain. After
                     // migrating the FIRST FF into IOLOGIC, walk downstream
@@ -836,10 +891,11 @@ void GowinPacker::pack_io_regs(void)
                     // minimize wire delays through the corner. User mandate:
                     // get all DQ[12] read-path FFs as close to IOLOGIC as
                     // possible. Enable via EXP_HH_DQ12_CHAIN_LOCK=1.
-                    if (getenv("EXP_HH_DQ12_CHAIN_LOCK") != nullptr &&
+                    if (is_dq12_iologic_target &&
+                        getenv("EXP_HH_DQ12_CHAIN_LOCK") != nullptr &&
                         std::string(getenv("EXP_HH_DQ12_CHAIN_LOCK")) == "1") {
                         // Walk downstream from IOLOGIC.Q4 net
-                        NetInfo *q4_net = dq12_iologic->getPort(id_Q4);
+                        NetInfo *q4_net = dq_iologic->getPort(id_Q4);
                         std::vector<CellInfo*> chain_ffs;
                         NetInfo *cur_net = q4_net;
                         for (int depth = 0; depth < 3 && cur_net != nullptr; depth++) {
@@ -883,7 +939,7 @@ void GowinPacker::pack_io_regs(void)
                 }
             }
         }
-        (void)dq12_iologic_migrated;
+        (void)dq_iologic_migrated;
 
         // R76G: env-gated synthetic multi-sink. Root cause (this session,
         // multi-artifact + Codex-corroborated): for a SINGLE-fanout
