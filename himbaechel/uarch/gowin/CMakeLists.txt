@@ -1,5 +1,10 @@
 if (NOT IMPORT_BBA_FILES)
     include(FindApycula)
+    execute_process(
+        COMMAND ${apycula_Python3_EXECUTABLE} -c "import apycula, pathlib; print(pathlib.Path(apycula.__file__).resolve().parent)"
+        OUTPUT_VARIABLE apycula_PKG_DIR
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
 endif()
 
 set(SOURCES
@@ -49,6 +54,8 @@ foreach (device ${HIMBAECHEL_GOWIN_DEVICES})
         INPUTS
             ${CMAKE_CURRENT_SOURCE_DIR}/gowin_arch_gen.py
             ${CMAKE_CURRENT_SOURCE_DIR}/constids.inc
+            ${apycula_PKG_DIR}/chipdb.py
+            ${apycula_PKG_DIR}/${device}.msgpack.xz
     )
 
     add_bba_compile_command(
