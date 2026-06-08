@@ -790,10 +790,18 @@ void GowinPacker::pack_io_regs(void)
         bool dq_iologic_migrated = false;
         bool is_dq12_iologic_target = is_sdram_dq12_iobuf(ctx, ci);
         bool is_dq14_iologic_target = is_sdram_dq14_iobuf(ctx, ci);
+        bool dq14_full_ivideo =
+                is_dq14_iologic_target && r56_env_enabled("EXP_HH_DQ14_FULL_IVIDEO");
         const char *dq_iologic_env = is_dq12_iologic_target ? "EXP_HH_DQ12_IOLOGIC" :
-                                     is_dq14_iologic_target ? "EXP_HH_DQ14_IOLOGIC" : nullptr;
+                                     is_dq14_iologic_target ?
+                                             (dq14_full_ivideo ? "EXP_HH_DQ14_FULL_IVIDEO"
+                                                               : "EXP_HH_DQ14_IOLOGIC") :
+                                             nullptr;
         int dq_iologic_index = is_dq14_iologic_target ? 14 : 12;
-        if (dq_iologic_env != nullptr && r56_env_enabled(dq_iologic_env) && ci.getPort(id_O) != nullptr) {
+        bool dq_iologic_enabled =
+                dq_iologic_env != nullptr &&
+                (dq14_full_ivideo || r56_env_enabled(dq_iologic_env));
+        if (dq_iologic_enabled && ci.getPort(id_O) != nullptr) {
             NetInfo *o_net = ci.ports.at(id_O).net;
             CellInfo *ff = (o_net != nullptr) ? net_only_drives(ctx, o_net, is_ff, id_D) : nullptr;
             CellInfo *dq14_bypass_lut = nullptr;
@@ -832,39 +840,103 @@ void GowinPacker::pack_io_regs(void)
                     std::string ff_type = ff->type.str(ctx);
                     IdString iologic_name = gwu.create_aux_name(
                             ci.name, 0, is_dq14_iologic_target ? "_dq14_iobff$" : "_dq12_iobff$");
-                    auto iologic_cell = gwu.create_cell(iologic_name, id_IOLOGICI_EMPTY);
+                    auto iologic_cell = gwu.create_cell(iologic_name, dq14_full_ivideo ? id_IVIDEO
+                                                                                       : id_IOLOGICI_EMPTY);
                     new_cells.push_back(std::move(iologic_cell));
                     CellInfo *dq_iologic = new_cells.back().get();
-                    // iter31 (2026-05-25): the CE-disconnect approach (iter30) was HW-disproven.
-                    // iter30 HW: F:10002000 (DQ[12] beat-B still wrong AND DQ[13] beat-A broke).
-                    // The disconnect re-routed the shared CE net via the router, causing
-                    // collateral on DQ[13]. iter31 reverts to the simplest IOLOGIC
-                    // migration — moves ALL ports including CE into the IOLOGIC unchanged.
-                    // Goal: keep bit-12 fix (IOLOGIC migration) without breaking DQ[13].
-                    // Expected: bit-12 fixed, bit-13 OK, bit-28 still wrong (= F:10000000).
-                    for (auto &port : ff->ports) {
-                        IdString port_name = port.first;
-                        ff->movePortTo(port_name, dq_iologic,
-                                       port_name != id_Q ? port_name : id_Q4);
+                    if (dq14_full_ivideo) {
+                        NetInfo *d_net = dq14_bypass_lut != nullptr ? o_net : ff->getPort(id_D);
+                        NetInfo *q_net = ff->getPort(id_Q);
+                        NetInfo *clk_net = ff->getPort(id_CLK);
+                        NetInfo *reset_net = nullptr;
+                        for (IdString lsr_port : {id_RESET, id_CLEAR, id_SET, id_PRESET}) {
+                            if (reset_net == nullptr)
+                                reset_net = ff->getPort(lsr_port);
+                        }
+                        NetInfo *gnd_net = ctx->nets.at(ctx->id("$PACKER_GND")).get();
+                        if (reset_net == nullptr)
+                            reset_net = gnd_net;
+                        if (clk_net == nullptr) {
+                            log_warning("%s: DQ[%d] capture FF %s has no CLK; skipping full IVIDEO.\n",
+                                        dq_iologic_env, dq_iologic_index, ctx->nameOf(ff));
+                            new_cells.pop_back();
+                            continue;
+                        }
+                        dq_iologic->addInput(id_D);
+                        dq_iologic->addInput(id_PCLK);
+                        dq_iologic->addInput(id_FCLK);
+                        dq_iologic->addInput(id_RESET);
+                        dq_iologic->addInput(id_CALIB);
+                        dq_iologic->connectPort(id_D, d_net);
+                        dq_iologic->connectPort(id_PCLK, clk_net);
+                        dq_iologic->connectPort(id_FCLK, clk_net);
+                        dq_iologic->connectPort(id_RESET, reset_net);
+                        dq_iologic->connectPort(id_CALIB, gnd_net);
+
+                        for (int q = 0; q < 7; ++q) {
+                            IdString q_port = ctx->idf("Q%d", q);
+                            dq_iologic->addOutput(q_port);
+                            if (q == 1) {
+                                dq_iologic->connectPort(q_port, q_net);
+                            } else {
+                                IdString dummy_name = ctx->idf("%s_q%d_keep$", iologic_name.c_str(ctx), q);
+                                NetInfo *dummy_net = ctx->createNet(dummy_name);
+                                dummy_net->attrs[ctx->id("keep")] = Property(1);
+                                dq_iologic->connectPort(q_port, dummy_net);
+                            }
+                        }
+
+                        for (IdString port_name : {id_D, id_Q, id_CLK, id_CE, id_RESET, id_CLEAR,
+                                                   id_SET, id_PRESET}) {
+                            ff->disconnectPort(port_name);
+                        }
+                        if (dq14_bypass_lut != nullptr) {
+                            dq14_bypass_lut->disconnectPort(id_I3);
+                            dq14_bypass_lut->disconnectPort(id_F);
+                            cells_to_remove.push_back(dq14_bypass_lut->name);
+                            if (dq14_bypass_net != nullptr)
+                                nets_to_remove.push_back(dq14_bypass_net->name);
+                        }
+                        dq_iologic->setParam(ctx->id("INMODE"), Property("VIDEORX"));
+                    } else {
+                        // iter31 (2026-05-25): the CE-disconnect approach (iter30) was HW-disproven.
+                        // iter30 HW: F:10002000 (DQ[12] beat-B still wrong AND DQ[13] beat-A broke).
+                        // The disconnect re-routed the shared CE net via the router, causing
+                        // collateral on DQ[13]. iter31 reverts to the simplest IOLOGIC
+                        // migration — moves ALL ports including CE into the IOLOGIC unchanged.
+                        // Goal: keep bit-12 fix (IOLOGIC migration) without breaking DQ[13].
+                        // Expected: bit-12 fixed, bit-13 OK, bit-28 still wrong (= F:10000000).
+                        for (auto &port : ff->ports) {
+                            IdString port_name = port.first;
+                            ff->movePortTo(port_name, dq_iologic,
+                                           port_name != id_Q ? port_name : id_Q4);
+                        }
+                        if (dq14_bypass_lut != nullptr) {
+                            dq_iologic->disconnectPort(id_D);
+                            dq_iologic->connectPort(id_D, o_net);
+                            dq14_bypass_lut->disconnectPort(id_I3);
+                            dq14_bypass_lut->disconnectPort(id_F);
+                            cells_to_remove.push_back(dq14_bypass_lut->name);
+                            if (dq14_bypass_net != nullptr)
+                                nets_to_remove.push_back(dq14_bypass_net->name);
+                        }
+                        dq_iologic->setAttr(id_HAS_REG, 1);
+                        dq_iologic->setAttr(id_IREG_TYPE, ff_type);
                     }
-                    if (dq14_bypass_lut != nullptr) {
-                        dq_iologic->disconnectPort(id_D);
-                        dq_iologic->connectPort(id_D, o_net);
-                        dq14_bypass_lut->disconnectPort(id_I3);
-                        dq14_bypass_lut->disconnectPort(id_F);
-                        cells_to_remove.push_back(dq14_bypass_lut->name);
-                        if (dq14_bypass_net != nullptr)
-                            nets_to_remove.push_back(dq14_bypass_net->name);
-                    }
-                    dq_iologic->setAttr(id_HAS_REG, 1);
-                    dq_iologic->setAttr(id_IREG_TYPE, ff_type);
                     cells_to_remove.push_back(ff->name);
                     dq_iologic_migrated = true;
-                    log_info("  %s: migrated DQ[%d] capture FF %s into "
-                             "IOLOGICI_EMPTY %s (HAS_REG=1, IREG_TYPE=%s) -- input register "
-                             "only, no OREG/TREG.\n",
-                             dq_iologic_env, dq_iologic_index, ctx->nameOf(ff), ctx->nameOf(dq_iologic),
-                             ff_type.c_str());
+                    if (dq14_full_ivideo) {
+                        log_info("  %s: migrated DQ[%d] capture FF %s into full IVIDEO %s "
+                                 "(INMODE=VIDEORX; real read net on logical Q1 -> physical Q4; "
+                                 "unused Q0/Q2..Q6 kept dummy nets).\n",
+                                 dq_iologic_env, dq_iologic_index, ctx->nameOf(ff), ctx->nameOf(dq_iologic));
+                    } else {
+                        log_info("  %s: migrated DQ[%d] capture FF %s into "
+                                 "IOLOGICI_EMPTY %s (HAS_REG=1, IREG_TYPE=%s) -- input register "
+                                 "only, no OREG/TREG.\n",
+                                 dq_iologic_env, dq_iologic_index, ctx->nameOf(ff), ctx->nameOf(dq_iologic),
+                                 ff_type.c_str());
+                    }
                     if (dq14_bypass_lut != nullptr) {
                         log_info("  %s: removed DQ[14] transparent LUT4 %s (INIT=0xff00, I3->F) "
                                  "between IOBUF.O and IOLOGIC.D.\n",
