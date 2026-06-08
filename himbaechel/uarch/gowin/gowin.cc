@@ -43,6 +43,11 @@ struct GowinImpl : HimbaechelAPI
     void preRoute() override;
     void postRoute() override;
 
+    // EXP_HH DQ[14] R37C4 exact-replica route forcing (env-gated, runs in postRoute)
+    void force_r37c4_pip(const char *dst_xy, const char *dst_base, const char *src_xy = nullptr,
+                         const char *src_base = nullptr, NetInfo *force_net = nullptr);
+    void force_r37c4_dq14_routes();
+
     bool isBelLocationValid(BelId bel, bool explain_invalid) const override;
     void notifyBelChange(BelId bel, CellInfo *cell) override;
 
@@ -1269,8 +1274,105 @@ void GowinImpl::postPlace()
 
 void GowinImpl::preRoute() { gowin_route_globals(ctx); }
 
+// EXP_HH DQ[14] R37C4 exact-replica: force one dst wire's source PIP to match the
+// Gowin twin. Robust to intra/inter-tile via getPipsUphill() enumeration; if the
+// residual is a wire alias (no programmable PIP) it logs a warning and skips rather
+// than aborting, so a single bad name yields full per-net diagnostics in one build.
+void GowinImpl::force_r37c4_pip(const char *dst_xy, const char *dst_base, const char *src_xy,
+                                const char *src_base, NetInfo *force_net)
+{
+    IdStringList dst_name = IdStringList::concat(ctx->id(dst_xy), ctx->id(dst_base));
+    WireId dst_wire = ctx->getWireByName(dst_name);
+    if (dst_wire == WireId()) {
+        log_warning("R37C4 force route: missing dst wire %s/%s -- skipping\n", dst_xy, dst_base);
+        return;
+    }
+
+    PipId matched_pip;
+    WireId matched_src;
+    IdStringList wanted_src_name;
+    if (src_xy != nullptr && src_base != nullptr)
+        wanted_src_name = IdStringList::concat(ctx->id(src_xy), ctx->id(src_base));
+
+    for (PipId pip : ctx->getPipsUphill(dst_wire)) {
+        WireId src = ctx->getPipSrcWire(pip);
+        if (src_xy != nullptr && src_base != nullptr) {
+            if (ctx->getWireName(src) != wanted_src_name)
+                continue;
+        } else {
+            // VCC tie: pick the uphill pip whose source is the arch VCC constant.
+            if (force_net == nullptr || force_net->name != ctx->id("$PACKER_VCC") ||
+                ctx->getWireConstantValue(src) != id_VCC)
+                continue;
+        }
+        matched_pip = pip;
+        matched_src = src;
+        break;
+    }
+
+    if (matched_pip == PipId()) {
+        if (src_xy != nullptr && src_base != nullptr)
+            log_warning("R37C4 %s/%s has no PIP from %s/%s (likely a wire alias) -- skipping\n", dst_xy, dst_base,
+                        src_xy, src_base);
+        else
+            log_warning("R37C4 %s/%s has no uphill VCC PIP (likely a wire alias) -- skipping\n", dst_xy, dst_base);
+        return;
+    }
+
+    NetInfo *net = force_net;
+    if (net == nullptr) {
+        net = ctx->getBoundWireNet(matched_src);
+        if (net == nullptr) {
+            log_warning("R37C4 %s/%s source %s is unbound; no net to force -- skipping\n", dst_xy, dst_base,
+                        ctx->nameOfWire(matched_src));
+            return;
+        }
+    }
+
+    NetInfo *src_net = ctx->getBoundWireNet(matched_src);
+    if (src_net != nullptr && src_net != net) {
+        log_warning("R37C4 %s/%s source %s already bound to %s, wanted %s -- skipping\n", dst_xy, dst_base,
+                    ctx->nameOfWire(matched_src), ctx->nameOf(src_net), ctx->nameOf(net));
+        return;
+    }
+
+    // Same safe (un)bind idiom used elsewhere in this uarch: rip up conflicting
+    // route objects before rebinding LOCKED.
+    NetInfo *pip_net = ctx->getBoundPipNet(matched_pip);
+    if (pip_net != nullptr)
+        ctx->unbindPip(matched_pip);
+    NetInfo *dst_net = ctx->getBoundWireNet(dst_wire);
+    if (dst_net != nullptr)
+        ctx->unbindWire(dst_wire);
+    if (ctx->getBoundWireNet(matched_src) == nullptr)
+        ctx->bindWire(matched_src, net, STRENGTH_LOCKED);
+    ctx->bindPip(matched_pip, net, STRENGTH_LOCKED);
+
+    log_info("R37C4 forced %s <- %s on net %s via %s\n", ctx->nameOfWire(dst_wire), ctx->nameOfWire(matched_src),
+             ctx->nameOf(net), ctx->nameOfPip(matched_pip));
+}
+
+void GowinImpl::force_r37c4_dq14_routes()
+{
+    auto vcc_it = ctx->nets.find(ctx->id("$PACKER_VCC"));
+    NetInfo *vcc_net = (vcc_it != ctx->nets.end()) ? vcc_it->second.get() : nullptr;
+
+    // R37C4 == X3Y36; neighbours R37C5 == X4Y36, R37C3 == X2Y36.
+    force_r37c4_pip("X3Y36", "C1", "X4Y36", "W26");    // IOBUF.OEN (write)
+    force_r37c4_pip("X3Y36", "D1", "X2Y36", "E10");    // IOBUF.I  (write)
+    force_r37c4_pip("X3Y36", "LSR0", "X3Y36", "LB01"); // IVIDEO.RESET (intra-tile)
+    if (vcc_net != nullptr) {
+        force_r37c4_pip("X3Y36", "N82", nullptr, nullptr, vcc_net);
+        force_r37c4_pip("X3Y36", "S26", nullptr, nullptr, vcc_net);
+        force_r37c4_pip("X3Y36", "W83", nullptr, nullptr, vcc_net);
+    }
+}
+
 void GowinImpl::postRoute()
 {
+    if (r57_env_enabled("EXP_HH_DQ14_R37C4_FORCE_ROUTES"))
+        force_r37c4_dq14_routes();
+
     std::set<IdString> visited_hclk_users;
 
     for (auto &cell : ctx->cells) {
