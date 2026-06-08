@@ -845,7 +845,10 @@ void GowinPacker::pack_io_regs(void)
                     new_cells.push_back(std::move(iologic_cell));
                     CellInfo *dq_iologic = new_cells.back().get();
                     if (dq14_full_ivideo) {
-                        NetInfo *d_net = dq14_bypass_lut != nullptr ? o_net : ff->getPort(id_D);
+                        // Keep D on DQ[14]'s IOBUF.O net so pack_ides_iol() derives
+                        // the IOLOGICI BEL from the adjacent IOBA, matching
+                        // the IOLOGICI_EMPTY migration path.
+                        NetInfo *d_net = o_net;
                         NetInfo *q_net = ff->getPort(id_Q);
                         NetInfo *clk_net = ff->getPort(id_CLK);
                         NetInfo *reset_net = nullptr;
@@ -898,6 +901,7 @@ void GowinPacker::pack_io_regs(void)
                                 nets_to_remove.push_back(dq14_bypass_net->name);
                         }
                         dq_iologic->setParam(ctx->id("INMODE"), Property("VIDEORX"));
+                        dq_iologic->setAttr(ctx->id("EXP_HH_DQ14_IOLOGICI_ONLY"), 1);
                     } else {
                         // iter31 (2026-05-25): the CE-disconnect approach (iter30) was HW-disproven.
                         // iter30 HW: F:10002000 (DQ[12] beat-B still wrong AND DQ[13] beat-A broke).

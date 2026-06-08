@@ -62,6 +62,9 @@ BelId GowinPacker::get_iologici_bel(CellInfo *iob)
 
 void GowinPacker::check_iologic_placement(CellInfo &ci, Loc iob_loc, int diff /* 1 - diff */)
 {
+    if (ci.attrs.count(ctx->id("EXP_HH_DQ14_IOLOGICI_ONLY"))) {
+        return;
+    }
     if (ci.type.in(id_ODDR, id_ODDRC, id_IDDR, id_IDDRC, id_OSER4, id_IOLOGICI_EMPTY, id_IOLOGICO_EMPTY) || diff) {
         return;
     }
@@ -243,6 +246,9 @@ bool GowinPacker::is_mipi_io(BelId bel)
 
 CellInfo *GowinPacker::create_aux_iologic_cell(CellInfo &ci, IdString mode, bool io16, int idx)
 {
+    if (ci.attrs.count(ctx->id("EXP_HH_DQ14_IOLOGICI_ONLY"))) {
+        return nullptr;
+    }
     if (ci.type.in(id_ODDR, id_ODDRC, id_OSER4, id_IDDR, id_IDDRC, id_IDES4, id_IOLOGICI_EMPTY, id_IOLOGICO_EMPTY)) {
         return nullptr;
     }
