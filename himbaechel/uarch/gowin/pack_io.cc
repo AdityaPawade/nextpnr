@@ -862,6 +862,10 @@ void GowinPacker::pack_io_regs(void)
                             new_cells.pop_back();
                             continue;
                         }
+                        for (IdString port_name : {id_D, id_Q, id_CLK, id_CE, id_RESET, id_CLEAR,
+                                                   id_SET, id_PRESET}) {
+                            ff->disconnectPort(port_name);
+                        }
                         dq_iologic->addInput(id_D);
                         dq_iologic->addInput(id_PCLK);
                         dq_iologic->addInput(id_FCLK);
@@ -886,10 +890,6 @@ void GowinPacker::pack_io_regs(void)
                             }
                         }
 
-                        for (IdString port_name : {id_D, id_Q, id_CLK, id_CE, id_RESET, id_CLEAR,
-                                                   id_SET, id_PRESET}) {
-                            ff->disconnectPort(port_name);
-                        }
                         if (dq14_bypass_lut != nullptr) {
                             dq14_bypass_lut->disconnectPort(id_I3);
                             dq14_bypass_lut->disconnectPort(id_F);
