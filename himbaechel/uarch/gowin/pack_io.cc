@@ -949,7 +949,8 @@ void GowinPacker::pack_io_regs(void)
                     // Option 2A++: optional IODELAY tap on the IOLOGIC cell.
                     // Combines iter9 fuse fix (bit-28 fix) with variable input-delay tap
                     // to potentially recover bit-12 (beat-A) sampling.
-                    const char *iodly_env = is_dq12_iologic_target ? getenv("EXP_HH_DQ12_IOLOGIC_IODELAY") : nullptr;
+                    const char *iodly_env = is_dq12_iologic_target ? getenv("EXP_HH_DQ12_IOLOGIC_IODELAY")
+                                          : is_dq14_iologic_target ? getenv("EXP_HH_DQ14_IOLOGIC_IODELAY") : nullptr;
                     if (iodly_env != nullptr && *iodly_env != '\0') {
                         int dly_val = atoi(iodly_env);
                         if (dly_val < 0) dly_val = 0;
