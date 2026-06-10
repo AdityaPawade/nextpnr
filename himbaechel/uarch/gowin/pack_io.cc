@@ -792,15 +792,23 @@ void GowinPacker::pack_io_regs(void)
         bool is_dq14_iologic_target = is_sdram_dq14_iobuf(ctx, ci);
         bool dq14_full_ivideo =
                 is_dq14_iologic_target && r56_env_enabled("EXP_HH_DQ14_FULL_IVIDEO");
+        // 2026-06-10 SDRAM-clk phase root cause: negedge DQ[14] capture (+half-cycle
+        // sampling shift) re-centers the SDRAM read-data eye that the ODDR-forwarded
+        // sdram_clk leaves straddling the posedge grid. Fabric DFFN* encode via slice
+        // CLKMUX_CLK=INV (proven); IOLOGIC CLKIMUX_CLK=INV has no fuses in the GW5A
+        // chipdb (silent no-op), so the retype happens on the FABRIC capture FF.
+        bool dq14_negedge_fabric =
+                is_dq14_iologic_target && r56_env_enabled("EXP_HH_DQ14_NEGEDGE_FABRIC");
         const char *dq_iologic_env = is_dq12_iologic_target ? "EXP_HH_DQ12_IOLOGIC" :
                                      is_dq14_iologic_target ?
-                                             (dq14_full_ivideo ? "EXP_HH_DQ14_FULL_IVIDEO"
-                                                               : "EXP_HH_DQ14_IOLOGIC") :
+                                             (dq14_negedge_fabric ? "EXP_HH_DQ14_NEGEDGE_FABRIC"
+                                              : dq14_full_ivideo  ? "EXP_HH_DQ14_FULL_IVIDEO"
+                                                                  : "EXP_HH_DQ14_IOLOGIC") :
                                              nullptr;
         int dq_iologic_index = is_dq14_iologic_target ? 14 : 12;
         bool dq_iologic_enabled =
                 dq_iologic_env != nullptr &&
-                (dq14_full_ivideo || r56_env_enabled(dq_iologic_env));
+                (dq14_full_ivideo || dq14_negedge_fabric || r56_env_enabled(dq_iologic_env));
         if (dq_iologic_enabled && ci.getPort(id_O) != nullptr) {
             NetInfo *o_net = ci.ports.at(id_O).net;
             CellInfo *ff = (o_net != nullptr) ? net_only_drives(ctx, o_net, is_ff, id_D) : nullptr;
@@ -831,6 +839,31 @@ void GowinPacker::pack_io_regs(void)
                 log_warning("%s: DQ[%d] O net is multi-sink; skipping migration "
                             "(baseline preserved).\n",
                             dq_iologic_env, dq_iologic_index);
+            } else if (dq14_negedge_fabric) {
+                // Retype the fabric capture FF to its negedge variant; no IOLOGIC
+                // is created (dq_iologic_migrated stays false so r76G etc. treat
+                // DQ[14] like every other DQ bit).
+                IdString old_t = ff->type;
+                IdString neg_t = old_t == id_DFF    ? id_DFFN
+                               : old_t == id_DFFE   ? id_DFFNE
+                               : old_t == id_DFFC   ? id_DFFNC
+                               : old_t == id_DFFCE  ? id_DFFNCE
+                               : old_t == id_DFFR   ? id_DFFNR
+                               : old_t == id_DFFRE  ? id_DFFNRE
+                               : old_t == id_DFFS   ? id_DFFNS
+                               : old_t == id_DFFSE  ? id_DFFNSE
+                               : old_t == id_DFFP   ? id_DFFNP
+                               : old_t == id_DFFPE  ? id_DFFNPE
+                               : IdString();
+                if (neg_t == IdString()) {
+                    log_warning("EXP_HH_DQ14_NEGEDGE_FABRIC: unsupported FF type %s on %s -- skipping.\n",
+                                old_t.c_str(ctx), ctx->nameOf(ff));
+                } else {
+                    ff->type = neg_t;
+                    log_info("  EXP_HH_DQ14_NEGEDGE_FABRIC=1: retyped DQ[14] capture FF %s %s -> %s "
+                             "(negedge capture; SDRAM read-eye re-center).\n",
+                             ctx->nameOf(ff), old_t.c_str(ctx), neg_t.c_str(ctx));
+                }
             } else {
                 BelId l_bel = get_iologici_bel(&ci);
                 if (l_bel == BelId()) {
