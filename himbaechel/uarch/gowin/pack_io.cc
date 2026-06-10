@@ -799,7 +799,17 @@ void GowinPacker::pack_io_regs(void)
         // chipdb (silent no-op), so the retype happens on the FABRIC capture FF.
         bool dq14_negedge_fabric =
                 is_dq14_iologic_target && r56_env_enabled("EXP_HH_DQ14_NEGEDGE_FABRIC");
-        const char *dq_iologic_env = is_dq12_iologic_target ? "EXP_HH_DQ12_IOLOGIC" :
+        // The eye-straddle afflicts ALL 16 DQ inputs (which pin falls out is
+        // P&R-dependent; B2/DQ[14] was just the recent builds' casualty —
+        // 3c4f903's "freeze-point is P&R-sensitive"). EXP_HH_DQ_NEGEDGE_ALL=1
+        // retypes EVERY SDRAM-DQ capture FF to negedge: every pin samples
+        // mid-eye, robust against P&R re-rolls.
+        bool dq_negedge_all =
+                is_sdram_dq_iobuf(ctx, ci) && r56_env_enabled("EXP_HH_DQ_NEGEDGE_ALL");
+        if (dq_negedge_all)
+            dq14_negedge_fabric = true; // same retype path for every DQ pin
+        const char *dq_iologic_env = dq_negedge_all ? "EXP_HH_DQ_NEGEDGE_ALL" :
+                                     is_dq12_iologic_target ? "EXP_HH_DQ12_IOLOGIC" :
                                      is_dq14_iologic_target ?
                                              (dq14_negedge_fabric ? "EXP_HH_DQ14_NEGEDGE_FABRIC"
                                               : dq14_full_ivideo  ? "EXP_HH_DQ14_FULL_IVIDEO"
@@ -860,9 +870,9 @@ void GowinPacker::pack_io_regs(void)
                                 old_t.c_str(ctx), ctx->nameOf(ff));
                 } else {
                     ff->type = neg_t;
-                    log_info("  EXP_HH_DQ14_NEGEDGE_FABRIC=1: retyped DQ[14] capture FF %s %s -> %s "
+                    log_info("  %s: retyped %s capture FF %s %s -> %s "
                              "(negedge capture; SDRAM read-eye re-center).\n",
-                             ctx->nameOf(ff), old_t.c_str(ctx), neg_t.c_str(ctx));
+                             dq_iologic_env, ctx->nameOf(&ci), ctx->nameOf(ff), old_t.c_str(ctx), neg_t.c_str(ctx));
                 }
             } else {
                 BelId l_bel = get_iologici_bel(&ci);
