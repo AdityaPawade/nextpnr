@@ -707,8 +707,16 @@ struct GowinGlobalRouter
         };
         RouteResult route_result = route_direct_net(net, strict_filter);
 
-        if (route_result == ROUTED_PARTIALLY && clk_tap_relax_enabled()) {
+        // NOT_ROUTED also qualifies: a net whose ONLY sinks are LUT data
+        // inputs (e.g. the minimal clk->INV->pad validation design) fails the
+        // whole strict pass, which then unbinds the source wire -- rebind it
+        // for the retry and undo on full failure.
+        if ((route_result == ROUTED_PARTIALLY || route_result == NOT_ROUTED) && clk_tap_relax_enabled()) {
             WireId src = ctx->getNetinfoSourceWire(net);
+            bool src_was_unbound = (ctx->getBoundWireNet(src) != net);
+            if (src_was_unbound) {
+                ctx->bindWire(src, net, STRENGTH_LOCKED);
+            }
             int fixed = 0;
             for (auto usr : net->users) {
                 if (!(usr.cell != nullptr && usr.cell->type.in(id_LUT1, id_LUT2, id_LUT3, id_LUT4) &&
@@ -752,9 +760,9 @@ struct GowinGlobalRouter
                         break;
                     }
                 }
-                if (all_routed) {
-                    route_result = ROUTED_ALL;
-                }
+                route_result = all_routed ? ROUTED_ALL : ROUTED_PARTIALLY;
+            } else if (src_was_unbound) {
+                ctx->unbindWire(src); // restore the strict pass's NOT_ROUTED state
             }
         }
 
