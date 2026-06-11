@@ -918,6 +918,47 @@ void GowinPacker::pack_io_regs(void)
             }
         }
 
+        // EXP_HH_SDRAM_OUT_PIN (build W3, 2026-06-12): pull EVERY SDRAM output
+        // launch FF pad-adjacent by placement — no IOLOGIC, no fuses. Baseline
+        // measurement: addr FFs sit 10-47 tiles inland while DQ/commands sit
+        // 1-6 -> address vs command/data straddle DIFFERENT SDRAM clock edges
+        // (the residual). The twin works because ALL its output paths meet one
+        // edge. Uniform-fast placement reproduces that without W2's selective-
+        // OREG alignment split. Stash target bel; GowinImpl::prePlace direct-FF
+        // fallback binds it LOCKED after the HCLK placer.
+        if (r56_env_enabled("EXP_HH_SDRAM_OUT_PIN") && ci.type.in(id_OBUF, id_IOBUF) &&
+            ci.name.str(ctx).find("sdram") != std::string::npos &&
+            ci.name.str(ctx).find("sdram_clk") == std::string::npos && ci.getPort(id_I) != nullptr &&
+            ci.bel != BelId()) {
+            do {
+                NetInfo *inet = ci.ports.at(id_I).net;
+                CellInfo *off = (inet != nullptr) ? net_driven_by(ctx, inet, is_ff, id_Q) : nullptr;
+                if (off == nullptr || inet->users.entries() != 1) {
+                    log_warning("EXP_HH_SDRAM_OUT_PIN: %s I-net %s; left to placer.\n", ctx->nameOf(&ci),
+                                off == nullptr ? "has no FF driver" : "is multi-sink");
+                    break;
+                }
+                Loc il = ctx->getBelLocation(ci.bel);
+                int mx = ctx->getGridDimX() - 1, my = ctx->getGridDimY() - 1;
+                int tx = il.x, ty = il.y;
+                if (il.x <= 1)
+                    tx = il.x + 1;
+                else if (il.x >= mx - 1)
+                    tx = il.x - 1;
+                else if (il.y <= 1)
+                    ty = il.y + 1;
+                else if (il.y >= my - 1)
+                    ty = il.y - 1;
+                std::string ioname = ctx->nameOfBel(ci.bel);
+                int slot = (!ioname.empty() && ioname.back() == 'A') ? 0 : 1;
+                std::string fbel = "X" + std::to_string(tx) + "Y" + std::to_string(ty) + "/DFF" + std::to_string(slot);
+                off->setAttr(ctx->id("EXP_HH_PIN_LUT_BEL"), std::string("-"));
+                off->setAttr(ctx->id("EXP_HH_PIN_DFF_BEL"), fbel);
+                log_info("  EXP_HH_SDRAM_OUT_PIN: %s launch FF %s marked for pad-adjacent pin %s.\n",
+                         ctx->nameOf(&ci), ctx->nameOf(off), fbel.c_str());
+            } while (false);
+        }
+
         // EXP_HH_DQ_OREG_ALL (build W, 2026-06-11): migrate the DQ WRITE-data FF
         // (IOBUF.I <- FF.Q) into the IOB output register for ALL 16 DQ. This is
         // the twin's ACTUAL pad architecture (named-attr fuse decode of the READY

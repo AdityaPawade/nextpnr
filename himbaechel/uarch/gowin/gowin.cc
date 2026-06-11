@@ -1002,7 +1002,7 @@ void GowinImpl::prepare_fast_logic_cell()
 
 void GowinImpl::constrain_exp_hh_dq_capture_clusters(void)
 {
-    if (!r57_env_enabled("EXP_HH_DQ_PIN_CAPTURE"))
+    if (!r57_env_enabled("EXP_HH_DQ_PIN_CAPTURE") && !r57_env_enabled("EXP_HH_SDRAM_OUT_PIN"))
         return;
 
     IdString lut_attr = ctx->id("EXP_HH_PIN_LUT_BEL");
