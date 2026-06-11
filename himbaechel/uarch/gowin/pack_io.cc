@@ -928,7 +928,8 @@ void GowinPacker::pack_io_regs(void)
         // fallback binds it LOCKED after the HCLK placer.
         if (r56_env_enabled("EXP_HH_SDRAM_OUT_PIN") && ci.type.in(id_OBUF, id_IOBUF) &&
             ci.name.str(ctx).find("sdram") != std::string::npos &&
-            ci.name.str(ctx).find("sdram_clk") == std::string::npos && ci.getPort(id_I) != nullptr &&
+            ci.name.str(ctx).find("sdram_clk") == std::string::npos &&
+            ci.name.str(ctx).find("sdram_dq") == std::string::npos && ci.getPort(id_I) != nullptr &&
             ci.bel != BelId()) {
             do {
                 NetInfo *inet = ci.ports.at(id_I).net;
@@ -945,7 +946,7 @@ void GowinPacker::pack_io_regs(void)
                     tx = il.x + 1;
                 else if (il.x >= mx - 1)
                     tx = il.x - 1;
-                else if (il.y <= 1)
+                if (il.y <= 1)
                     ty = il.y + 1;
                 else if (il.y >= my - 1)
                     ty = il.y - 1;
