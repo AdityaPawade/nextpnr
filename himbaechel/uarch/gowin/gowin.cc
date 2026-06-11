@@ -1016,7 +1016,15 @@ void GowinImpl::constrain_exp_hh_dq_capture_clusters(void)
 
         std::string lut_bel_name = dff->attrs.at(lut_attr).as_string();
         std::string dff_bel_name = dff->attrs.count(dff_attr) ? dff->attrs.at(dff_attr).as_string() : std::string();
-        IdString root_name = ctx->id(std::string("$BUFLUT_") + dff->name.str(ctx));
+        // Resolve the FF's REAL cluster root: LUTFF pairing or BUFLUT wrapping
+        // both make the FF a cluster CHILD — locking the child is overridden
+        // when the placer moves the cluster by its root. cluster id == root
+        // cell name in this codebase.
+        IdString root_name;
+        if (dff->cluster != ClusterId() && dff->cluster != dff->name)
+            root_name = dff->cluster;
+        else
+            root_name = ctx->id(std::string("$BUFLUT_") + dff->name.str(ctx));
         auto root_it = ctx->cells.find(root_name);
 
         if (root_it != ctx->cells.end()) {
@@ -1062,8 +1070,8 @@ void GowinImpl::constrain_exp_hh_dq_capture_clusters(void)
                 // to itself". The LOCKED bind alone fixes the cell in place.
                 if (root->bel == BelId())
                     ctx->bindBel(lut_bel, root, PlaceStrength::STRENGTH_LOCKED);
-                if (dff->bel == BelId())
-                    ctx->bindBel(dff_bel, dff, PlaceStrength::STRENGTH_LOCKED);
+                // do NOT bind the child: cluster members follow the locked root
+                // (binding the child separately is what the placer overrode).
                 log_info("  EXP_HH_DQ_PIN_CAPTURE: locked BUFLUT root %s -> %s and capture FF %s -> %s "
                          "after HCLK placement.\n",
                          root->name.c_str(ctx), lut_bel_name.c_str(), dff->name.c_str(ctx), dff_bel_name.c_str());
