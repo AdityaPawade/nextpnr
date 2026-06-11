@@ -1097,6 +1097,29 @@ void GowinImpl::constrain_exp_hh_dq_capture_clusters(void)
                 // constraint placer re-bind the already-bound FF (same double-bind
                 // fixed in the root branch, commit 4d4ffe7f).
                 ctx->bindBel(dff_bel, dff, PlaceStrength::STRENGTH_LOCKED);
+                // Slice-legality blockers: fill the slice's other DFF slots with
+                // dummy FFs sharing this FF's control set (clk/ce/lsr + D=GND),
+                // so the placer cannot drop an incompatible FF next to the lock
+                // (the 'Placing design failed' wall, W3c/W3f).
+                {
+                    Loc fl = ctx->getBelLocation(dff_bel);
+                    NetInfo *gnd = ctx->nets.count(ctx->id("$PACKER_GND")) ? ctx->nets.at(ctx->id("$PACKER_GND")).get() : nullptr;
+                    for (int z = 0; z < 8; ++z) {
+                        if (z == fl.z) continue;
+                        BelId bb = ctx->getBelByLocation(Loc(fl.x, fl.y, z));
+                        if (bb == BelId() || !ctx->checkBelAvail(bb) || !isValidBelForCellType(dff->type, bb)) continue;
+                        IdString bn = ctx->idf("$EXPHH_BLK_X%dY%d_%d", fl.x, fl.y, z);
+                        auto bc = gwu.create_cell(bn, dff->type);
+                        CellInfo *blk = bc.get();
+                        ctx->cells[bn] = std::move(bc);
+                        for (IdString pp : {ctx->id("CLK"), ctx->id("CE"), ctx->id("SET"), ctx->id("RESET"), ctx->id("PRESET"), ctx->id("CLEAR")}) {
+                            NetInfo *nn = dff->getPort(pp);
+                            if (nn) { blk->addInput(pp); blk->connectPort(pp, nn); }
+                        }
+                        if (gnd) { blk->addInput(ctx->id("D")); blk->connectPort(ctx->id("D"), gnd); }
+                        ctx->bindBel(bb, blk, PlaceStrength::STRENGTH_LOCKED);
+                    }
+                }
                 log_info("  EXP_HH_DQ_PIN_CAPTURE: locked unbuffered capture FF %s -> %s after HCLK placement.\n",
                          dff->name.c_str(ctx), dff_bel_name.c_str());
                 ++pinned_ff;
