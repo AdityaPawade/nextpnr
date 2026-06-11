@@ -604,6 +604,22 @@ void GowinPacker::pin_sdram_clk_inverter(void)
                     ctx->nameOf(inv), inv->type.c_str(ctx));
         return;
     }
+    // Move the inverter input to I1 (physical B pin), Gowin twin's exact form
+    // (LUT4 INIT=0x3333 = ~I1). The clock network's fabric taps (GB00->EW10/
+    // EW20/SEL3) only reach B-inputs via the EW spur wires; an A-input is
+    // physically unreachable from the clock net, so an I0 inverter can never
+    // route (the EXP_HH arch_fail even with the globals retry).
+    if (inv->type == id_LUT1 && inv->getPort(id_I0) != nullptr && inv->getPort(id_I1) == nullptr) {
+        Property init = inv->params.count(id_INIT) ? inv->params.at(id_INIT) : Property(1, 2);
+        uint64_t v = init.as_int64() & 0x3; // LUT1 truth table: bit0=f(0), bit1=f(1)
+        inv->type = id_LUT4;
+        inv->params[id_INIT] = Property(v == 1 ? 0x3333 : 0xCCCC, 16); // 01=inverter, 10=buffer
+        inv->addInput(id_I1);
+        inv->movePortTo(id_I0, inv, id_I1);
+        log_info("EXP_HH_CLK_TAP_RELAX: retyped O_sdram_clk inverter %s LUT1(I0) -> LUT4 INIT=0x%04x on I1 "
+                 "(B pin; only tap-reachable input, matches Gowin twin).\n",
+                 ctx->nameOf(inv), v == 1 ? 0x3333 : 0xCCCC);
+    }
     inv->setAttr(id_BEL, std::string("X59Y35/LUT1"));
     log_info("EXP_HH_CLK_TAP_RELAX: pinned O_sdram_clk inverter %s to X59Y35/LUT1 (Gowin twin site R36C60).\n",
              ctx->nameOf(inv));
