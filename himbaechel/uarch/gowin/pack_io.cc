@@ -918,6 +918,47 @@ void GowinPacker::pack_io_regs(void)
             }
         }
 
+        // EXP_HH_DQ_OREG_ALL (build W, 2026-06-11): migrate the DQ WRITE-data FF
+        // (IOBUF.I <- FF.Q) into the IOB output register for ALL 16 DQ. This is
+        // the twin's ACTUAL pad architecture (named-attr fuse decode of the READY
+        // twin at every DQ tile: OUTMODE=OREG, CLKOMUX=ENABLE, SRMODE=LSR_OVER_CE,
+        // LSRMUX_LSR=INV — and NO input-side attrs; the twin reads combinationally
+        // into fabric). OEN is deliberately NOT migrated (Codex adversarial review:
+        // keep diagnostic isolation; TREG is a separate lever). Mirrors the generic
+        // OBUF/IOBUF I<-FF.Q migration below (D -> D0, HAS_REG + OREG_TYPE).
+        if (is_sdram_dq_iobuf(ctx, ci) && r56_env_enabled("EXP_HH_DQ_OREG_ALL") && ci.getPort(id_I) != nullptr) {
+            do {
+                CellInfo *wff = net_driven_by(ctx, ci.ports.at(id_I).net, is_ff, id_Q);
+                if (wff == nullptr) {
+                    log_warning("EXP_HH_DQ_OREG_ALL: %s I-net has no FF driver; skipping (baseline kept).\n",
+                                ctx->nameOf(&ci));
+                    break;
+                }
+                if (ci.ports.at(id_I).net->users.entries() != 1) {
+                    log_warning("EXP_HH_DQ_OREG_ALL: %s I-net is multi-sink; skipping (baseline kept).\n",
+                                ctx->nameOf(&ci));
+                    break;
+                }
+                if (get_iologico_bel(&ci) == BelId()) {
+                    log_warning("EXP_HH_DQ_OREG_ALL: no IOLOGICO bel for %s; skipping (baseline kept).\n",
+                                ctx->nameOf(&ci));
+                    break;
+                }
+                IdString oreg_name = gwu.create_aux_name(ci.name, 1, "_dq_oreg$");
+                auto oreg_cell = gwu.create_cell(oreg_name, id_IOLOGICO_EMPTY);
+                new_cells.push_back(std::move(oreg_cell));
+                CellInfo *iol = new_cells.back().get();
+                for (auto &port : wff->ports)
+                    wff->movePortTo(port.first, iol, port.first != id_D ? port.first : id_D0);
+                iol->setAttr(id_HAS_REG, 1);
+                iol->setAttr(id_OREG_TYPE, wff->type.str(ctx));
+                cells_to_remove.push_back(wff->name);
+                log_info("  EXP_HH_DQ_OREG_ALL: %s write FF %s -> IOLOGICO_EMPTY %s (OREG, pad-timed write "
+                         "launch; twin-match).\n",
+                         ctx->nameOf(&ci), ctx->nameOf(wff), ctx->nameOf(iol));
+            } while (false);
+        }
+
         bool dq14_full_ivideo =
                 is_dq14_iologic_target && r56_env_enabled("EXP_HH_DQ14_FULL_IVIDEO");
         // 2026-06-10 SDRAM-clk phase root cause: negedge DQ[14] capture (+half-cycle
