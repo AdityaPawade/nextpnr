@@ -594,6 +594,32 @@ static bool is_sdram_dq_iobuf(const Context *ctx, const CellInfo &ci)
            name.find(".IO_sdram_dq[") != std::string::npos;
 }
 
+static int sdram_dq_iobuf_index(const Context *ctx, const CellInfo &ci)
+{
+    if (ci.type != id_IOBUF)
+        return -1;
+    std::string name = ci.name.str(ctx);
+    size_t pos = name.find(".IO_sdram_dq[");
+    if (pos == std::string::npos)
+        pos = name.find("gen_sdram_dq_iob[");
+    if (pos == std::string::npos)
+        return -1;
+    pos = name.find('[', pos);
+    if (pos == std::string::npos)
+        return -1;
+    ++pos;
+    int idx = 0;
+    bool any_digit = false;
+    while (pos < name.size() && name[pos] >= '0' && name[pos] <= '9') {
+        idx = idx * 10 + (name[pos] - '0');
+        any_digit = true;
+        ++pos;
+    }
+    if (!any_digit || pos >= name.size() || name[pos] != ']' || idx < 0 || idx > 15)
+        return -1;
+    return idx;
+}
+
 // Narrow detector for DQ[12] only (re-added 2026-05-21 for the placement-
 // perturbation experiment after IOLOGIC OREG path produced 3 HW failures).
 // Codex (job 6c55f8d5) recommends pivoting to baseline-only DQ[12] capture
@@ -790,6 +816,8 @@ void GowinPacker::pack_io_regs(void)
         bool dq_iologic_migrated = false;
         bool is_dq12_iologic_target = is_sdram_dq12_iobuf(ctx, ci);
         bool is_dq14_iologic_target = is_sdram_dq14_iobuf(ctx, ci);
+        bool is_dq_all_iologic_target = is_sdram_dq_iobuf(ctx, ci) &&
+                                        r56_env_enabled("EXP_HH_DQ_IOLOGIC_ALL");
 
         // ---- EXP_HH closure (2026-06-11): all-16 DQ capture-margin levers ----
         // The twin-exact SDRAM clock leaves the CPU coherent but a hair early in
@@ -909,13 +937,16 @@ void GowinPacker::pack_io_regs(void)
         // single-sink path so it does not double-handle or emit spurious skips.
         bool dq_negedge_all = false;
         const char *dq_iologic_env = dq_negedge_all ? "EXP_HH_DQ_NEGEDGE_ALL" :
+                                     is_dq_all_iologic_target ? "EXP_HH_DQ_IOLOGIC_ALL" :
                                      is_dq12_iologic_target ? "EXP_HH_DQ12_IOLOGIC" :
                                      is_dq14_iologic_target ?
                                              (dq14_negedge_fabric ? "EXP_HH_DQ14_NEGEDGE_FABRIC"
                                               : dq14_full_ivideo  ? "EXP_HH_DQ14_FULL_IVIDEO"
                                                                   : "EXP_HH_DQ14_IOLOGIC") :
                                              nullptr;
-        int dq_iologic_index = is_dq14_iologic_target ? 14 : 12;
+        int dq_iologic_index = sdram_dq_iobuf_index(ctx, ci);
+        if (dq_iologic_index < 0)
+            dq_iologic_index = is_dq14_iologic_target ? 14 : 12;
         bool dq_iologic_enabled =
                 dq_iologic_env != nullptr &&
                 (dq14_full_ivideo || dq14_negedge_fabric || r56_env_enabled(dq_iologic_env));
@@ -981,8 +1012,8 @@ void GowinPacker::pack_io_regs(void)
                                 dq_iologic_env, dq_iologic_index);
                 } else {
                     std::string ff_type = ff->type.str(ctx);
-                    IdString iologic_name = gwu.create_aux_name(
-                            ci.name, 0, is_dq14_iologic_target ? "_dq14_iobff$" : "_dq12_iobff$");
+                    std::string iologic_suffix = "_dq" + std::to_string(dq_iologic_index) + "_iobff$";
+                    IdString iologic_name = gwu.create_aux_name(ci.name, 0, iologic_suffix.c_str());
                     auto iologic_cell = gwu.create_cell(iologic_name, dq14_full_ivideo ? id_IVIDEO
                                                                                        : id_IOLOGICI_EMPTY);
                     new_cells.push_back(std::move(iologic_cell));
