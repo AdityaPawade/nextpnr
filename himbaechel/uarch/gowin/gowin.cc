@@ -125,6 +125,7 @@ struct GowinImpl : HimbaechelAPI
     // to avoid routing conflicts and maximize utilization
     void place_constrained_hclk_cells();
     void place_5a_hclks(void);
+    void constrain_exp_hh_dq_capture_clusters(void);
     void constrain_r56_fabric_dq_capture_ffs(void);
     void log_r57_preplace_debug_ffs(void);
 
@@ -643,6 +644,7 @@ void GowinImpl::place_constrained_hclk_cells()
     std::map<BelId, std::set<std::pair<IdString, int>>> bel_cell_map;
     std::vector<std::pair<IdString, int>> alias_cells;
     std::map<std::pair<IdString, int>, BelId> final_placement;
+    std::set<IdString> warned_missing_hclk_aliases;
 
     const bool chip_has_clkdiv_hclk_connection = gwu.has_CLKDIV_HCLK();
     const bool chip_has_pll_hclk = gwu.has_PLL_HCLK();
@@ -762,7 +764,16 @@ void GowinImpl::place_constrained_hclk_cells()
             continue;
         }
         for (auto candidate : bel_cell_candidates.second) {
-            auto ci = ctx->cells.at(candidate.first).get();
+            auto ci_it = ctx->cells.find(candidate.first);
+            if (ci_it == ctx->cells.end()) {
+                if (!warned_missing_hclk_aliases.count(candidate.first)) {
+                    log_warning("Custom HCLK Placer: skipping stale HCLK alias %s; driver cell is no longer live.\n",
+                                candidate.first.c_str(ctx));
+                    warned_missing_hclk_aliases.insert(candidate.first);
+                }
+                continue;
+            }
+            auto ci = ci_it->second.get();
             if ((ci->type != id_CLKDIV) || ci->attrs.count(id_BEL)) {
                 continue;
             }
@@ -862,7 +873,13 @@ void GowinImpl::place_constrained_hclk_cells()
         for (auto match_pair : full_matching) {
             auto alias = match_pair.second;
             auto bel = match_pair.first;
-            auto cell_type = ctx->cells.at(alias.first).get()->type;
+            auto ci_it = ctx->cells.find(alias.first);
+            if (ci_it == ctx->cells.end()) {
+                log_info("stale alias %s Alias %d <-----> HCLK Section at %s\n", alias.first.c_str(ctx),
+                         alias.second, bel.str(ctx).c_str());
+                continue;
+            }
+            auto cell_type = ci_it->second.get()->type;
             log_info("%s cell %s Alias %d <-----> HCLK Section at %s\n", cell_type.c_str(ctx), alias.first.c_str(ctx),
                      alias.second, bel.str(ctx).c_str());
         }
@@ -870,7 +887,16 @@ void GowinImpl::place_constrained_hclk_cells()
     }
 
     for (auto cell_alias : alias_cells) {
-        auto ci = ctx->cells.at(cell_alias.first).get();
+        auto ci_it = ctx->cells.find(cell_alias.first);
+        if (ci_it == ctx->cells.end()) {
+            if (!warned_missing_hclk_aliases.count(cell_alias.first)) {
+                log_warning("Custom HCLK Placer: skipping stale HCLK alias %s; driver cell is no longer live.\n",
+                            cell_alias.first.c_str(ctx));
+                warned_missing_hclk_aliases.insert(cell_alias.first);
+            }
+            continue;
+        }
+        auto ci = ci_it->second.get();
 
         if (final_placement.find(cell_alias) == final_placement.end() && ctx->debug)
             if (ci->type == id_CLKDIV2 || ci->type == id_CLKDIV)
@@ -939,6 +965,11 @@ void GowinImpl::prePlace()
     place_constrained_hclk_cells();
     if (r57_debug) {
         log_info("R57 prePlace: after place_constrained_hclk_cells()\n");
+        log_info("R57 prePlace: before constrain_exp_hh_dq_capture_clusters()\n");
+    }
+    constrain_exp_hh_dq_capture_clusters();
+    if (r57_debug) {
+        log_info("R57 prePlace: after constrain_exp_hh_dq_capture_clusters()\n");
         log_info("R57 prePlace: before constrain_r56_fabric_dq_capture_ffs()\n");
     }
     constrain_r56_fabric_dq_capture_ffs();
@@ -967,6 +998,103 @@ void GowinImpl::prepare_fast_logic_cell()
             fast_logic_cell.at(loc.x, loc.y).resize(37);
         }
     }
+}
+
+void GowinImpl::constrain_exp_hh_dq_capture_clusters(void)
+{
+    if (!r57_env_enabled("EXP_HH_DQ_PIN_CAPTURE"))
+        return;
+
+    IdString lut_attr = ctx->id("EXP_HH_PIN_LUT_BEL");
+    IdString dff_attr = ctx->id("EXP_HH_PIN_DFF_BEL");
+    int pinned_root = 0, pinned_ff = 0, skipped = 0;
+
+    for (auto &cell : ctx->cells) {
+        CellInfo *dff = cell.second.get();
+        if (!dff->attrs.count(lut_attr))
+            continue;
+
+        std::string lut_bel_name = dff->attrs.at(lut_attr).as_string();
+        std::string dff_bel_name = dff->attrs.count(dff_attr) ? dff->attrs.at(dff_attr).as_string() : std::string();
+        IdString root_name = ctx->id(std::string("$BUFLUT_") + dff->name.str(ctx));
+        auto root_it = ctx->cells.find(root_name);
+
+        if (root_it != ctx->cells.end()) {
+            CellInfo *root = root_it->second.get();
+            BelId lut_bel = ctx->getBelByNameStr(lut_bel_name);
+            BelId dff_bel = dff_bel_name.empty() ? BelId() : ctx->getBelByNameStr(dff_bel_name);
+            bool ok = true;
+
+            if (lut_bel == BelId() || !isValidBelForCellType(root->type, lut_bel)) {
+                log_warning("EXP_HH_DQ_PIN_CAPTURE: root target BEL %s is invalid for %s; leaving %s unpinned.\n",
+                            lut_bel_name.c_str(), root->type.c_str(ctx), root->name.c_str(ctx));
+                ok = false;
+            } else if (root->bel != BelId() && root->bel != lut_bel) {
+                log_warning("EXP_HH_DQ_PIN_CAPTURE: root %s is already placed at %s, wanted %s; leaving it.\n",
+                            root->name.c_str(ctx), ctx->nameOfBel(root->bel), lut_bel_name.c_str());
+                ok = false;
+            } else if (root->bel == BelId() && !ctx->checkBelAvail(lut_bel)) {
+                log_warning("EXP_HH_DQ_PIN_CAPTURE: root target BEL %s is already taken by %s; leaving %s "
+                            "unpinned.\n",
+                            lut_bel_name.c_str(), ctx->nameOf(ctx->getBoundBelCell(lut_bel)), root->name.c_str(ctx));
+                ok = false;
+            }
+
+            if (dff_bel == BelId() || !isValidBelForCellType(dff->type, dff_bel)) {
+                log_warning("EXP_HH_DQ_PIN_CAPTURE: FF target BEL %s is invalid for %s; leaving %s unpinned.\n",
+                            dff_bel_name.c_str(), dff->type.c_str(ctx), dff->name.c_str(ctx));
+                ok = false;
+            } else if (dff->bel != BelId() && dff->bel != dff_bel) {
+                log_warning("EXP_HH_DQ_PIN_CAPTURE: FF %s is already placed at %s, wanted %s; leaving it.\n",
+                            dff->name.c_str(ctx), ctx->nameOfBel(dff->bel), dff_bel_name.c_str());
+                ok = false;
+            } else if (dff->bel == BelId() && !ctx->checkBelAvail(dff_bel)) {
+                log_warning("EXP_HH_DQ_PIN_CAPTURE: FF target BEL %s is already taken by %s; leaving %s "
+                            "unpinned.\n",
+                            dff_bel_name.c_str(), ctx->nameOf(ctx->getBoundBelCell(dff_bel)), dff->name.c_str(ctx));
+                ok = false;
+            }
+
+            if (ok) {
+                root->setAttr(id_BEL, lut_bel_name);
+                if (root->bel == BelId())
+                    ctx->bindBel(lut_bel, root, PlaceStrength::STRENGTH_LOCKED);
+                if (dff->bel == BelId())
+                    ctx->bindBel(dff_bel, dff, PlaceStrength::STRENGTH_LOCKED);
+                log_info("  EXP_HH_DQ_PIN_CAPTURE: locked BUFLUT root %s -> %s and capture FF %s -> %s "
+                         "after HCLK placement.\n",
+                         root->name.c_str(ctx), lut_bel_name.c_str(), dff->name.c_str(ctx), dff_bel_name.c_str());
+                ++pinned_root;
+            } else {
+                ++skipped;
+            }
+        } else if (!dff_bel_name.empty()) {
+            BelId dff_bel = ctx->getBelByNameStr(dff_bel_name);
+            if (dff_bel != BelId() && isValidBelForCellType(dff->type, dff_bel) && dff->bel == BelId() &&
+                ctx->checkBelAvail(dff_bel)) {
+                dff->setAttr(id_BEL, dff_bel_name);
+                ctx->bindBel(dff_bel, dff, PlaceStrength::STRENGTH_LOCKED);
+                log_info("  EXP_HH_DQ_PIN_CAPTURE: locked unbuffered capture FF %s -> %s after HCLK placement.\n",
+                         dff->name.c_str(ctx), dff_bel_name.c_str());
+                ++pinned_ff;
+            } else {
+                log_warning("EXP_HH_DQ_PIN_CAPTURE: no BUFLUT root for %s and direct FF target %s is unavailable; "
+                            "leaving it unpinned.\n",
+                            dff->name.c_str(ctx), dff_bel_name.c_str());
+                ++skipped;
+            }
+        } else {
+            ++skipped;
+        }
+
+        dff->unsetAttr(lut_attr);
+        dff->unsetAttr(dff_attr);
+    }
+
+    if (pinned_root || pinned_ff || skipped)
+        log_info("EXP_HH_DQ_PIN_CAPTURE: post-HCLK locked %d DQ capture cluster roots (+%d direct-FF fallback, "
+                 "%d skipped) to pad-adjacent slices.\n",
+                 pinned_root, pinned_ff, skipped);
 }
 
 struct R56DqCaptureCandidate

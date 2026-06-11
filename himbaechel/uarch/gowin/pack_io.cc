@@ -806,7 +806,7 @@ void GowinPacker::pack_io_regs(void)
         bool dq_cap_pin = is_sdram_dq_iobuf(ctx, ci) && r56_env_enabled("EXP_HH_DQ_PIN_CAPTURE");
         if ((dq_cap_negedge || dq_cap_pin) && ci.getPort(id_O) != nullptr) {
             NetInfo *cap_onet = ci.ports.at(id_O).net;
-            CellInfo *cap_buflut = nullptr, *cap_ff = nullptr;
+            CellInfo *cap_ff = nullptr;
             if (cap_onet != nullptr) {
                 // At pack_io_regs the DQ O-net drives the capture FF DIRECTLY on D;
                 // the $BUFLUT pass-through is inserted in a later pass. The other
@@ -829,7 +829,6 @@ void GowinPacker::pack_io_regs(void)
                             continue;
                         CellInfo *cand = net_only_drives(ctx, fnet, is_ff, id_D);
                         if (cand != nullptr) {
-                            cap_buflut = lut;
                             cap_ff = cand;
                             break;
                         }
@@ -875,13 +874,18 @@ void GowinPacker::pack_io_regs(void)
                             "X" + std::to_string(tx) + "Y" + std::to_string(ty) + "/LUT" + std::to_string(slot);
                     std::string fbel =
                             "X" + std::to_string(tx) + "Y" + std::to_string(ty) + "/DFF" + std::to_string(slot);
-                    cap_ff->setAttr(id_BEL, fbel);
-                    if (cap_buflut != nullptr)
-                        cap_buflut->setAttr(id_BEL, lbel);
-                    log_info("  EXP_HH_DQ_PIN_CAPTURE: %s pad %s -> FF %s%s (pad-adjacent; later "
-                             "BUFLUT pairs into the free LUT slot).\n",
-                             ctx->nameOf(&ci), ioname.c_str(), fbel.c_str(),
-                             cap_buflut != nullptr ? " +BUFLUT" : "");
+                    // The capture FF becomes a CHILD of the (later-inserted) BUFLUT
+                    // cluster (insert_buffer_luts_for_orphan_dffs makes the BUFLUT the
+                    // cluster root, FF the child at z+1), so a BEL attr on the FF alone
+                    // is ignored -- the placer places the cluster by its ROOT. Stash the
+                    // target bels; GowinImpl::prePlace() applies the hard lock after
+                    // the custom HCLK placer has finished, with a direct-FF fallback if
+                    // the FF stayed unbuffered.
+                    cap_ff->setAttr(ctx->id("EXP_HH_PIN_LUT_BEL"), lbel);
+                    cap_ff->setAttr(ctx->id("EXP_HH_PIN_DFF_BEL"), fbel);
+                    log_info("  EXP_HH_DQ_PIN_CAPTURE: %s pad %s -> marked FF %s for cluster-root "
+                             "pin (LUT %s / DFF %s, pad-adjacent).\n",
+                             ctx->nameOf(&ci), ioname.c_str(), ctx->nameOf(cap_ff), lbel.c_str(), fbel.c_str());
                 }
             }
         }
