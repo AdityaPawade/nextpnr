@@ -620,9 +620,14 @@ void GowinPacker::pin_sdram_clk_inverter(void)
                  "(B pin; only tap-reachable input, matches Gowin twin).\n",
                  ctx->nameOf(inv), v == 1 ? 0x3333 : 0xCCCC);
     }
-    inv->setAttr(id_BEL, std::string("X59Y35/LUT1"));
-    log_info("EXP_HH_CLK_TAP_RELAX: pinned O_sdram_clk inverter %s to X59Y35/LUT1 (Gowin twin site R36C60).\n",
-             ctx->nameOf(inv));
+    // Option-A clock-phase knob: EXP_HH_CLK_INV_BEL overrides the inverter site.
+    // Pinning the LUT farther from the E3 pad OBUF (R37C60) lengthens the clk
+    // route -> adds SDRAM-clock lag in ~ns steps. Default = Gowin twin site.
+    const char *inv_bel_env = std::getenv("EXP_HH_CLK_INV_BEL");
+    std::string inv_bel = (inv_bel_env && inv_bel_env[0]) ? std::string(inv_bel_env) : std::string("X59Y35/LUT1");
+    inv->setAttr(id_BEL, inv_bel);
+    log_info("EXP_HH_CLK_TAP_RELAX: pinned O_sdram_clk inverter %s to %s (default twin site R36C60=X59Y35/LUT1).\n",
+             ctx->nameOf(inv), inv_bel.c_str());
 }
 
 void GowinPacker::run(void)
