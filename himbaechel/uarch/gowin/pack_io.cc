@@ -944,6 +944,19 @@ void GowinPacker::pack_io_regs(void)
                                 ctx->nameOf(&ci));
                     break;
                 }
+                // Twin fuse ground truth (incl. the lone-B tile X11Y36, which the
+                // twin leaves BARE): only A-half pins are pad-registered; B-half
+                // OREG has no fuses (IOLOGICB table is unmapped) and migrating a
+                // B-half FF creates a dead write path. Keep B-half FFs in fabric.
+                {
+                    std::string iob_name = ci.bel != BelId() ? ctx->nameOfBel(ci.bel) : std::string();
+                    if (!iob_name.empty() && iob_name.back() == 'B') {
+                        log_info("  EXP_HH_DQ_OREG_ALL: %s is a B-half pad (%s); write FF stays in fabric "
+                                 "(twin-match).\n",
+                                 ctx->nameOf(&ci), iob_name.c_str());
+                        break;
+                    }
+                }
                 IdString oreg_name = gwu.create_aux_name(ci.name, 1, "_dq_oreg$");
                 auto oreg_cell = gwu.create_cell(oreg_name, id_IOLOGICO_EMPTY);
                 new_cells.push_back(std::move(oreg_cell));
