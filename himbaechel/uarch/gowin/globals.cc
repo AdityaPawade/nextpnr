@@ -741,6 +741,16 @@ struct GowinGlobalRouter
                         log_info("      pip %s\n", ctx->nameOfPip(p));
                     }
                 }
+            } else {
+                int up = 0;
+                for (PipId p : ctx->getPipsUphill(dst)) {
+                    NPNR_UNUSED(p);
+                    ++up;
+                }
+                log_warning("    EXP_HH_CLK_TAP_RELAX: BFS FAILED for clock-as-data sink %s.%s -> wire %s "
+                            "(src %s, %d uphill pips at sink).\n",
+                            ctx->nameOf(usr.cell), usr.port.c_str(ctx), ctx->nameOfWire(dst), ctx->nameOfWire(src),
+                            up);
             }
         }
         return fixed;
