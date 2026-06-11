@@ -808,27 +808,36 @@ void GowinPacker::pack_io_regs(void)
             NetInfo *cap_onet = ci.ports.at(id_O).net;
             CellInfo *cap_buflut = nullptr, *cap_ff = nullptr;
             if (cap_onet != nullptr) {
+                // At pack_io_regs the DQ O-net drives the capture FF DIRECTLY on D;
+                // the $BUFLUT pass-through is inserted in a later pass. The other
+                // sink is the r76G synthetic msink (LUT4 INIT=0xaaaa on I0) -- skip it.
                 for (auto &usr : cap_onet->users) {
-                    CellInfo *lut = usr.cell;
-                    if (usr.port != id_I3 || lut == nullptr || lut->type != id_LUT4 ||
-                        !lut->params.count(id_INIT))
-                        continue;
-                    if ((lut->params.at(id_INIT).as_int64() & 0xffff) != 0xff00)
-                        continue;
-                    NetInfo *fnet = lut->getPort(id_F);
-                    if (fnet == nullptr)
-                        continue;
-                    CellInfo *cand = net_only_drives(ctx, fnet, is_ff, id_D);
-                    if (cand != nullptr) {
-                        cap_buflut = lut;
-                        cap_ff = cand;
+                    if (usr.port == id_D && usr.cell != nullptr && is_ff(ctx, usr.cell)) {
+                        cap_ff = usr.cell;
                         break;
+                    }
+                }
+                // Fallback: if a buffer LUT was already inserted, walk LUT -> F -> FF
+                // through any input except the I0 msink.
+                if (cap_ff == nullptr) {
+                    for (auto &usr : cap_onet->users) {
+                        CellInfo *lut = usr.cell;
+                        if (lut == nullptr || lut->type != id_LUT4 || usr.port == id_I0)
+                            continue;
+                        NetInfo *fnet = lut->getPort(id_F);
+                        if (fnet == nullptr)
+                            continue;
+                        CellInfo *cand = net_only_drives(ctx, fnet, is_ff, id_D);
+                        if (cand != nullptr) {
+                            cap_buflut = lut;
+                            cap_ff = cand;
+                            break;
+                        }
                     }
                 }
             }
             if (cap_ff == nullptr) {
-                log_warning("EXP_HH DQ-capture: %s O-net has no BUFLUT(0xff00)->FF path; "
-                            "skipping (baseline kept).\n",
+                log_warning("EXP_HH DQ-capture: %s O-net has no capture FF; skipping (baseline kept).\n",
                             ctx->nameOf(&ci));
             } else {
                 if (dq_cap_negedge) {
@@ -866,10 +875,13 @@ void GowinPacker::pack_io_regs(void)
                             "X" + std::to_string(tx) + "Y" + std::to_string(ty) + "/LUT" + std::to_string(slot);
                     std::string fbel =
                             "X" + std::to_string(tx) + "Y" + std::to_string(ty) + "/DFF" + std::to_string(slot);
-                    cap_buflut->setAttr(id_BEL, lbel);
                     cap_ff->setAttr(id_BEL, fbel);
-                    log_info("  EXP_HH_DQ_PIN_CAPTURE: %s pad %s -> BUFLUT %s, FF %s (pad-adjacent).\n",
-                             ctx->nameOf(&ci), ioname.c_str(), lbel.c_str(), fbel.c_str());
+                    if (cap_buflut != nullptr)
+                        cap_buflut->setAttr(id_BEL, lbel);
+                    log_info("  EXP_HH_DQ_PIN_CAPTURE: %s pad %s -> FF %s%s (pad-adjacent; later "
+                             "BUFLUT pairs into the free LUT slot).\n",
+                             ctx->nameOf(&ci), ioname.c_str(), fbel.c_str(),
+                             cap_buflut != nullptr ? " +BUFLUT" : "");
                 }
             }
         }
