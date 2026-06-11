@@ -714,6 +714,9 @@ void GowinPacker::run(void)
         log_info("[gowin] routing policy: buffer-LUT mode disabled "
                  "(override -> disabled by env GOWIN_BUFFER_LUTS=%s); REG_SD route allowed\n", shown);
     }
+    // EXP_HH_DQ_PIN_CAPTURE: pin DQ capture cluster roots pad-adjacent (must run
+    // AFTER insert_buffer_luts_for_orphan_dffs so the $BUFLUT cluster roots exist).
+    pin_dq_capture_clusters();
     ctx->check();
 
     // Phase 7 LSR canonicalize — MOVED to end of pack pipeline (Phase 7c)
