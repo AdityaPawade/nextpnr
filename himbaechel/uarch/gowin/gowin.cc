@@ -1036,6 +1036,15 @@ void GowinImpl::constrain_exp_hh_dq_capture_clusters(void)
             dff->cluster = ClusterId();
             root_it = ctx->cells.end();
         }
+        // If the FF is itself a cluster ROOT with children, release them too:
+        // a locked root with constrained children can still be relocated by the
+        // legalizer as a group (the 11 stragglers in W3g).
+        if (!dff->constr_children.empty()) {
+            for (CellInfo *ch2 : dff->constr_children)
+                ch2->cluster = ClusterId();
+            dff->constr_children.clear();
+            dff->cluster = ClusterId();
+        }
 
         if (root_it != ctx->cells.end()) {
             CellInfo *root = root_it->second.get();
