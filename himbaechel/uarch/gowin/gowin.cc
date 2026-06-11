@@ -1056,7 +1056,10 @@ void GowinImpl::constrain_exp_hh_dq_capture_clusters(void)
             }
 
             if (ok) {
-                root->setAttr(id_BEL, lut_bel_name);
+                // bindBel below is the actual LOCKED placement. Do NOT also set the
+                // id_BEL attr: the generic constraint placer scans id_BEL cells and
+                // would try to bind this already-bound root again -> "already bound
+                // to itself". The LOCKED bind alone fixes the cell in place.
                 if (root->bel == BelId())
                     ctx->bindBel(lut_bel, root, PlaceStrength::STRENGTH_LOCKED);
                 if (dff->bel == BelId())
