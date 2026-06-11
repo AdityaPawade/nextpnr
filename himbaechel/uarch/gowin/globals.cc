@@ -649,14 +649,19 @@ struct GowinGlobalRouter
         NetInfo *net_before_buf = buf_ci->getPort(id_I);
         NPNR_ASSERT(net_before_buf != nullptr);
 
-        RouteResult route_result = route_direct_net(
-                net,
-                [&](PipId pip, WireId src_wire) {
-                    return global_pip_filter(pip, src_wire) && segment_wire_filter(pip) && dcs_input_filter(pip);
-                },
-                src);
+        auto strict_filter = [&](PipId pip, WireId src_wire) {
+            return global_pip_filter(pip, src_wire) && segment_wire_filter(pip) && dcs_input_filter(pip);
+        };
+        RouteResult route_result = route_direct_net(net, strict_filter, src);
         if (route_result == NOT_ROUTED) {
             log_error("Can't route the %s net. It might be worth removing the BUFG buffer flag.\n", ctx->nameOf(net));
+        }
+        // EXP_HH_CLK_TAP_RELAX: BUFG-driven clock nets (the EXP_HH case) land
+        // here, not in route_clk_net -- give their clock-as-data LUT sinks
+        // (the ~clk inverter) the same tap+local retry before router2, which
+        // is barred from all global pips, arch_fails on them.
+        if (route_result == ROUTED_PARTIALLY && clk_tap_relax_enabled()) {
+            retry_clock_as_data_sinks(net, src, strict_filter);
         }
 
         // b) route net before buf from whatever to the buf input
@@ -699,6 +704,48 @@ struct GowinGlobalRouter
         return !wire_type.in(id_GLOBAL_CLK, id_IO_O, id_IO_I, id_PLL_O, id_PLL_I, id_TILE_CLK);
     }
 
+    // Retry every still-unrouted LUT-data sink of a clock net with
+    // local->local pips additionally allowed (all other guards kept).
+    // Returns the number of sinks fixed.
+    template <typename Tfilter> int retry_clock_as_data_sinks(NetInfo *net, WireId src, Tfilter strict_filter)
+    {
+        int fixed = 0;
+        for (auto usr : net->users) {
+            if (!(usr.cell != nullptr && usr.cell->type.in(id_LUT1, id_LUT2, id_LUT3, id_LUT4) &&
+                  usr.port.in(id_I0, id_I1, id_I2, id_I3))) {
+                continue;
+            }
+            WireId dst = ctx->getNetinfoSinkWire(net, usr, 0);
+            if (dst == WireId() || ctx->getBoundWireNet(dst) == net) {
+                continue; // invalid or already routed by the strict pass
+            }
+            std::vector<PipId> path;
+            bool ok = backwards_bfs_route(
+                    net, src, dst, 1000000, false,
+                    [&](PipId pip, WireId src_wire) {
+                        if (strict_filter(pip, src_wire)) {
+                            return true;
+                        }
+                        IdString st = ctx->getWireType(ctx->getPipSrcWire(pip));
+                        IdString dt = ctx->getWireType(ctx->getPipDstWire(pip));
+                        return wire_type_is_local(st) && wire_type_is_local(dt) && segment_wire_filter(pip) &&
+                               dcs_input_filter(pip) && clock_gate_wire_filter(pip);
+                    },
+                    &path);
+            if (ok) {
+                ++fixed;
+                log_info("    EXP_HH_CLK_TAP_RELAX: routed clock-as-data sink %s.%s (%d new pips).\n",
+                         ctx->nameOf(usr.cell), usr.port.c_str(ctx), int(path.size()));
+                if (ctx->verbose) {
+                    for (PipId p : path) {
+                        log_info("      pip %s\n", ctx->nameOfPip(p));
+                    }
+                }
+            }
+        }
+        return fixed;
+    }
+
     RouteResult route_clk_net(NetInfo *net)
     {
         auto strict_filter = [&](PipId pip, WireId src_wire) {
@@ -717,40 +764,7 @@ struct GowinGlobalRouter
             if (src_was_unbound) {
                 ctx->bindWire(src, net, STRENGTH_LOCKED);
             }
-            int fixed = 0;
-            for (auto usr : net->users) {
-                if (!(usr.cell != nullptr && usr.cell->type.in(id_LUT1, id_LUT2, id_LUT3, id_LUT4) &&
-                      usr.port.in(id_I0, id_I1, id_I2, id_I3))) {
-                    continue;
-                }
-                WireId dst = ctx->getNetinfoSinkWire(net, usr, 0);
-                if (dst == WireId() || ctx->getBoundWireNet(dst) == net) {
-                    continue; // invalid or already routed by the strict pass
-                }
-                std::vector<PipId> path;
-                bool ok = backwards_bfs_route(
-                        net, src, dst, 1000000, false,
-                        [&](PipId pip, WireId src_wire) {
-                            if (strict_filter(pip, src_wire)) {
-                                return true;
-                            }
-                            IdString st = ctx->getWireType(ctx->getPipSrcWire(pip));
-                            IdString dt = ctx->getWireType(ctx->getPipDstWire(pip));
-                            return wire_type_is_local(st) && wire_type_is_local(dt) && segment_wire_filter(pip) &&
-                                   dcs_input_filter(pip) && clock_gate_wire_filter(pip);
-                        },
-                        &path);
-                if (ok) {
-                    ++fixed;
-                    log_info("    EXP_HH_CLK_TAP_RELAX: routed clock-as-data sink %s.%s (%d new pips).\n",
-                             ctx->nameOf(usr.cell), usr.port.c_str(ctx), int(path.size()));
-                    if (ctx->verbose) {
-                        for (PipId p : path) {
-                            log_info("      pip %s\n", ctx->nameOfPip(p));
-                        }
-                    }
-                }
-            }
+            int fixed = retry_clock_as_data_sinks(net, src, strict_filter);
             if (fixed > 0) {
                 bool all_routed = true;
                 for (auto usr : net->users) {
