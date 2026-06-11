@@ -952,7 +952,8 @@ void GowinPacker::pack_io_regs(void)
                 std::string ioname = ctx->nameOfBel(ci.bel);
                 int slot = (!ioname.empty() && ioname.back() == 'A') ? 0 : 1;
                 std::string fbel = "X" + std::to_string(tx) + "Y" + std::to_string(ty) + "/DFF" + std::to_string(slot);
-                off->setAttr(ctx->id("EXP_HH_PIN_LUT_BEL"), std::string("-"));
+                std::string lbel = "X" + std::to_string(tx) + "Y" + std::to_string(ty) + "/LUT" + std::to_string(slot);
+                off->setAttr(ctx->id("EXP_HH_PIN_LUT_BEL"), lbel);
                 off->setAttr(ctx->id("EXP_HH_PIN_DFF_BEL"), fbel);
                 log_info("  EXP_HH_SDRAM_OUT_PIN: %s launch FF %s marked for pad-adjacent pin %s.\n",
                          ctx->nameOf(&ci), ctx->nameOf(off), fbel.c_str());
