@@ -1026,6 +1026,16 @@ void GowinImpl::constrain_exp_hh_dq_capture_clusters(void)
         else
             root_name = ctx->id(std::string("$BUFLUT_") + dff->name.str(ctx));
         auto root_it = ctx->cells.find(root_name);
+        // LUTFF-paired roots are real user LUTs (ABC names): locking them trips
+        // HCLK-placer stale lookups and drags logic to the pad. Detach the FF
+        // from such clusters and lock the FF alone (launch edge = FF.Q->pad).
+        if (root_it != ctx->cells.end() && root_name.str(ctx).rfind("$BUFLUT_", 0) != 0) {
+            CellInfo *r = root_it->second.get();
+            auto &ch = r->constr_children;
+            ch.erase(std::remove(ch.begin(), ch.end(), dff), ch.end());
+            dff->cluster = ClusterId();
+            root_it = ctx->cells.end();
+        }
 
         if (root_it != ctx->cells.end()) {
             CellInfo *root = root_it->second.get();
