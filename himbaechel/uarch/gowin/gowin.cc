@@ -1075,7 +1075,9 @@ void GowinImpl::constrain_exp_hh_dq_capture_clusters(void)
             BelId dff_bel = ctx->getBelByNameStr(dff_bel_name);
             if (dff_bel != BelId() && isValidBelForCellType(dff->type, dff_bel) && dff->bel == BelId() &&
                 ctx->checkBelAvail(dff_bel)) {
-                dff->setAttr(id_BEL, dff_bel_name);
+                // bindBel(LOCKED) alone — setting id_BEL too makes the generic
+                // constraint placer re-bind the already-bound FF (same double-bind
+                // fixed in the root branch, commit 4d4ffe7f).
                 ctx->bindBel(dff_bel, dff, PlaceStrength::STRENGTH_LOCKED);
                 log_info("  EXP_HH_DQ_PIN_CAPTURE: locked unbuffered capture FF %s -> %s after HCLK placement.\n",
                          dff->name.c_str(ctx), dff_bel_name.c_str());
