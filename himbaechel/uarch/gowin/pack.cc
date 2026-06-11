@@ -571,9 +571,48 @@ void GowinPacker::pack_emcu_and_flash(void)
     pack_userflash(have_emcu);
 }
 
+// EXP_HH_CLK_TAP_RELAX companion (2026-06-11): pin the ~clk inverter LUT that
+// feeds the O_sdram_clk OBUF to the Gowin twin's exact site (X59Y35/LUT1 =
+// R36C60 slice1, the tile directly above the E3 pad). Without the pin the
+// placer chooses an arbitrary site and the SDRAM clock lag becomes an
+// arbitrary route delay -- a passing HW result would be uninterpretable
+// (Codex review point). Runs before pack_iobs while the OBUF is still the
+// yosys-emitted cell.
+void GowinPacker::pin_sdram_clk_inverter(void)
+{
+    const char *en = getenv("EXP_HH_CLK_TAP_RELAX");
+    if (en == nullptr || en[0] == 0 || strcmp(en, "0") == 0) {
+        return;
+    }
+    auto port_it = ctx->ports.find(ctx->id("O_sdram_clk"));
+    if (port_it == ctx->ports.end() || port_it->second.net == nullptr) {
+        return;
+    }
+    CellInfo *obuf = port_it->second.net->driver.cell;
+    if (obuf == nullptr) {
+        return;
+    }
+    NetInfo *i_net = obuf->getPort(id_I);
+    if (i_net == nullptr || i_net->driver.cell == nullptr) {
+        log_warning("EXP_HH_CLK_TAP_RELAX: O_sdram_clk OBUF has no driven I net; inverter not pinned.\n");
+        return;
+    }
+    CellInfo *inv = i_net->driver.cell;
+    if (!inv->type.in(id_LUT1, id_LUT2, id_LUT3, id_LUT4)) {
+        log_warning("EXP_HH_CLK_TAP_RELAX: O_sdram_clk driver %s is %s, not a LUT; inverter not pinned "
+                    "(is patch_clk_obuf_to_oddr still active?).\n",
+                    ctx->nameOf(inv), inv->type.c_str(ctx));
+        return;
+    }
+    inv->setAttr(id_BEL, std::string("X59Y35/LUT1"));
+    log_info("EXP_HH_CLK_TAP_RELAX: pinned O_sdram_clk inverter %s to X59Y35/LUT1 (Gowin twin site R36C60).\n",
+             ctx->nameOf(inv));
+}
+
 void GowinPacker::run(void)
 {
     handle_constants();
+    pin_sdram_clk_inverter();
     pack_iobs();
     ctx->check();
 

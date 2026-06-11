@@ -21,6 +21,8 @@
 #include "nextpnr.h"
 #include "util.h"
 
+#include <cstdlib>
+#include <cstring>
 #include <queue>
 
 #define HIMBAECHEL_CONSTIDS "uarch/gowin/constids.inc"
@@ -672,12 +674,90 @@ struct GowinGlobalRouter
         log_info("    '%s' net was routed.\n", ctx->nameOf(net));
     }
 
+    // EXP_HH_CLK_TAP_RELAX (2026-06-11): clock-as-data escape for Gowin-style
+    // SDRAM clock structure. The HW-proven Gowin twin computes ~clk in a
+    // fabric LUT next to the pad: GB00 -(tap)-> EW10 -> LUT input (one local
+    // hop). The strict global filter below cannot take local->local pips, and
+    // router2 is barred from ALL global pips (gowin.cc checkPipAvail), so a
+    // LUT-data sink of a clock net is unroutable by either router -> arch_fail.
+    // Per Codex review: do NOT use the blunt is_relaxed_sink hook (it bypasses
+    // the clock-gate/segment/DCS filters); instead retry ONLY the failed
+    // LUT-data sinks with local->local additionally allowed, keeping every
+    // other guard in force. The BFS rides the already-bound spine tree, exits
+    // at the nearest tap and binds just the new tail pips LOCKED.
+    static bool clk_tap_relax_enabled()
+    {
+        static const bool en = [] {
+            const char *e = getenv("EXP_HH_CLK_TAP_RELAX");
+            return e != nullptr && e[0] != 0 && strcmp(e, "0") != 0;
+        }();
+        return en;
+    }
+
+    bool wire_type_is_local(IdString wire_type) const
+    {
+        return !wire_type.in(id_GLOBAL_CLK, id_IO_O, id_IO_I, id_PLL_O, id_PLL_I, id_TILE_CLK);
+    }
+
     RouteResult route_clk_net(NetInfo *net)
     {
-        RouteResult route_result = route_direct_net(net, [&](PipId pip, WireId src_wire) {
+        auto strict_filter = [&](PipId pip, WireId src_wire) {
             return clock_gate_wire_filter(pip) && global_pip_filter(pip, src_wire) && segment_wire_filter(pip) &&
                    dcs_input_filter(pip);
-        });
+        };
+        RouteResult route_result = route_direct_net(net, strict_filter);
+
+        if (route_result == ROUTED_PARTIALLY && clk_tap_relax_enabled()) {
+            WireId src = ctx->getNetinfoSourceWire(net);
+            int fixed = 0;
+            for (auto usr : net->users) {
+                if (!(usr.cell != nullptr && usr.cell->type.in(id_LUT1, id_LUT2, id_LUT3, id_LUT4) &&
+                      usr.port.in(id_I0, id_I1, id_I2, id_I3))) {
+                    continue;
+                }
+                WireId dst = ctx->getNetinfoSinkWire(net, usr, 0);
+                if (dst == WireId() || ctx->getBoundWireNet(dst) == net) {
+                    continue; // invalid or already routed by the strict pass
+                }
+                std::vector<PipId> path;
+                bool ok = backwards_bfs_route(
+                        net, src, dst, 1000000, false,
+                        [&](PipId pip, WireId src_wire) {
+                            if (strict_filter(pip, src_wire)) {
+                                return true;
+                            }
+                            IdString st = ctx->getWireType(ctx->getPipSrcWire(pip));
+                            IdString dt = ctx->getWireType(ctx->getPipDstWire(pip));
+                            return wire_type_is_local(st) && wire_type_is_local(dt) && segment_wire_filter(pip) &&
+                                   dcs_input_filter(pip) && clock_gate_wire_filter(pip);
+                        },
+                        &path);
+                if (ok) {
+                    ++fixed;
+                    log_info("    EXP_HH_CLK_TAP_RELAX: routed clock-as-data sink %s.%s (%d new pips).\n",
+                             ctx->nameOf(usr.cell), usr.port.c_str(ctx), int(path.size()));
+                    if (ctx->verbose) {
+                        for (PipId p : path) {
+                            log_info("      pip %s\n", ctx->nameOfPip(p));
+                        }
+                    }
+                }
+            }
+            if (fixed > 0) {
+                bool all_routed = true;
+                for (auto usr : net->users) {
+                    WireId dst = ctx->getNetinfoSinkWire(net, usr, 0);
+                    if (dst != WireId() && ctx->getBoundWireNet(dst) != net) {
+                        all_routed = false;
+                        break;
+                    }
+                }
+                if (all_routed) {
+                    route_result = ROUTED_ALL;
+                }
+            }
+        }
+
         if (route_result != NOT_ROUTED) {
             log_info("    '%s' net was routed using global resources %s.\n", ctx->nameOf(net),
                      route_result == ROUTED_ALL ? "only" : "partially");

@@ -40,6 +40,7 @@ struct GowinPacker
     }
 
     // IO
+    void pin_sdram_clk_inverter(void);
     void pack_iobs(void);
     void pack_i3c(void);
     void pack_mipi(void);
