@@ -659,8 +659,10 @@ struct GowinGlobalRouter
         // EXP_HH_CLK_TAP_RELAX: BUFG-driven clock nets (the EXP_HH case) land
         // here, not in route_clk_net -- give their clock-as-data LUT sinks
         // (the ~clk inverter) the same tap+local retry before router2, which
-        // is barred from all global pips, arch_fails on them.
-        if (route_result == ROUTED_PARTIALLY && clk_tap_relax_enabled()) {
+        // is barred from all global pips, arch_fails on them. Run regardless
+        // of route_result (order-dependent accumulator can report ROUTED_ALL
+        // despite a failed early sink); the helper skips bound sinks.
+        if (clk_tap_relax_enabled()) {
             retry_clock_as_data_sinks(net, src, strict_filter);
         }
 
@@ -764,11 +766,12 @@ struct GowinGlobalRouter
         };
         RouteResult route_result = route_direct_net(net, strict_filter);
 
-        // NOT_ROUTED also qualifies: a net whose ONLY sinks are LUT data
-        // inputs (e.g. the minimal clk->INV->pad validation design) fails the
-        // whole strict pass, which then unbinds the source wire -- rebind it
-        // for the retry and undo on full failure.
-        if ((route_result == ROUTED_PARTIALLY || route_result == NOT_ROUTED) && clk_tap_relax_enabled()) {
+        // Always retry when enabled, regardless of route_result:
+        // route_direct_net's accumulator is order-dependent (a failing sink
+        // followed by successes ends as ROUTED_ALL), so a failed LUT sink can
+        // hide behind an all-routed verdict. The helper skips bound sinks, so
+        // this is a no-op when everything truly routed.
+        if (clk_tap_relax_enabled()) {
             WireId src = ctx->getNetinfoSourceWire(net);
             bool src_was_unbound = (ctx->getBoundWireNet(src) != net);
             if (src_was_unbound) {
