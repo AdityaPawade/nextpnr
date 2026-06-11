@@ -790,6 +790,90 @@ void GowinPacker::pack_io_regs(void)
         bool dq_iologic_migrated = false;
         bool is_dq12_iologic_target = is_sdram_dq12_iobuf(ctx, ci);
         bool is_dq14_iologic_target = is_sdram_dq14_iobuf(ctx, ci);
+
+        // ---- EXP_HH closure (2026-06-11): all-16 DQ capture-margin levers ----
+        // The twin-exact SDRAM clock leaves the CPU coherent but a hair early in
+        // the read eye: our fabric capture FF sits 1-8 tiles inland (through the
+        // r76G BUFLUT) vs the twin's pad-adjacent IOLOGIC. Two FSM-safe,
+        // IOLOGIC-free levers, independently gated, applied to ALL 16 DQ:
+        //   EXP_HH_DQ_NEGEDGE_ALL : sample +half-cycle later (DFFxE -> DFFNxE)
+        //   EXP_HH_DQ_PIN_CAPTURE : pin BUFLUT+FF to the slice adjacent to the pad
+        // Finder: the DQ O-net feeds a pass-through BUFLUT (LUT4 INIT=0xff00 on I3)
+        // -> capture FF; the other sink (LUT4 INIT=0xaaaa on I0) is the r76G
+        // synthetic msink and is ignored. Generalizes the old DQ14 single-sink
+        // bypass to all DQ and to the 2-sink msink shape.
+        bool dq_cap_negedge = is_sdram_dq_iobuf(ctx, ci) && r56_env_enabled("EXP_HH_DQ_NEGEDGE_ALL");
+        bool dq_cap_pin = is_sdram_dq_iobuf(ctx, ci) && r56_env_enabled("EXP_HH_DQ_PIN_CAPTURE");
+        if ((dq_cap_negedge || dq_cap_pin) && ci.getPort(id_O) != nullptr) {
+            NetInfo *cap_onet = ci.ports.at(id_O).net;
+            CellInfo *cap_buflut = nullptr, *cap_ff = nullptr;
+            if (cap_onet != nullptr) {
+                for (auto &usr : cap_onet->users) {
+                    CellInfo *lut = usr.cell;
+                    if (usr.port != id_I3 || lut == nullptr || lut->type != id_LUT4 ||
+                        !lut->params.count(id_INIT))
+                        continue;
+                    if ((lut->params.at(id_INIT).as_int64() & 0xffff) != 0xff00)
+                        continue;
+                    NetInfo *fnet = lut->getPort(id_F);
+                    if (fnet == nullptr)
+                        continue;
+                    CellInfo *cand = net_only_drives(ctx, fnet, is_ff, id_D);
+                    if (cand != nullptr) {
+                        cap_buflut = lut;
+                        cap_ff = cand;
+                        break;
+                    }
+                }
+            }
+            if (cap_ff == nullptr) {
+                log_warning("EXP_HH DQ-capture: %s O-net has no BUFLUT(0xff00)->FF path; "
+                            "skipping (baseline kept).\n",
+                            ctx->nameOf(&ci));
+            } else {
+                if (dq_cap_negedge) {
+                    IdString ot = cap_ff->type;
+                    IdString nt = ot == id_DFF    ? id_DFFN   : ot == id_DFFE  ? id_DFFNE
+                                : ot == id_DFFC   ? id_DFFNC  : ot == id_DFFCE ? id_DFFNCE
+                                : ot == id_DFFR   ? id_DFFNR  : ot == id_DFFRE ? id_DFFNRE
+                                : ot == id_DFFS   ? id_DFFNS  : ot == id_DFFSE ? id_DFFNSE
+                                : ot == id_DFFP   ? id_DFFNP  : ot == id_DFFPE ? id_DFFNPE
+                                                                               : IdString();
+                    if (nt == IdString())
+                        log_warning("EXP_HH_DQ_NEGEDGE_ALL: unsupported FF type %s on %s; skipping.\n",
+                                    ot.c_str(ctx), ctx->nameOf(cap_ff));
+                    else {
+                        cap_ff->type = nt;
+                        log_info("  EXP_HH_DQ_NEGEDGE_ALL: %s capture FF %s %s -> %s (+half-cycle).\n",
+                                 ctx->nameOf(&ci), ctx->nameOf(cap_ff), ot.c_str(ctx), nt.c_str(ctx));
+                    }
+                }
+                if (dq_cap_pin && ci.bel != BelId()) {
+                    Loc il = ctx->getBelLocation(ci.bel);
+                    int mx = ctx->getGridDimX() - 1, my = ctx->getGridDimY() - 1;
+                    int tx = il.x, ty = il.y;
+                    if (il.x <= 1)
+                        tx = il.x + 1;
+                    else if (il.x >= mx - 1)
+                        tx = il.x - 1;
+                    else if (il.y <= 1)
+                        ty = il.y + 1;
+                    else if (il.y >= my - 1)
+                        ty = il.y - 1;
+                    std::string ioname = ctx->nameOfBel(ci.bel);
+                    int slot = (!ioname.empty() && ioname.back() == 'A') ? 0 : 1;
+                    std::string lbel =
+                            "X" + std::to_string(tx) + "Y" + std::to_string(ty) + "/LUT" + std::to_string(slot);
+                    std::string fbel =
+                            "X" + std::to_string(tx) + "Y" + std::to_string(ty) + "/DFF" + std::to_string(slot);
+                    cap_buflut->setAttr(id_BEL, lbel);
+                    cap_ff->setAttr(id_BEL, fbel);
+                    log_info("  EXP_HH_DQ_PIN_CAPTURE: %s pad %s -> BUFLUT %s, FF %s (pad-adjacent).\n",
+                             ctx->nameOf(&ci), ioname.c_str(), lbel.c_str(), fbel.c_str());
+                }
+            }
+        }
+
         bool dq14_full_ivideo =
                 is_dq14_iologic_target && r56_env_enabled("EXP_HH_DQ14_FULL_IVIDEO");
         // 2026-06-10 SDRAM-clk phase root cause: negedge DQ[14] capture (+half-cycle
@@ -804,10 +888,10 @@ void GowinPacker::pack_io_regs(void)
         // 3c4f903's "freeze-point is P&R-sensitive"). EXP_HH_DQ_NEGEDGE_ALL=1
         // retypes EVERY SDRAM-DQ capture FF to negedge: every pin samples
         // mid-eye, robust against P&R re-rolls.
-        bool dq_negedge_all =
-                is_sdram_dq_iobuf(ctx, ci) && r56_env_enabled("EXP_HH_DQ_NEGEDGE_ALL");
-        if (dq_negedge_all)
-            dq14_negedge_fabric = true; // same retype path for every DQ pin
+        // EXP_HH_DQ_NEGEDGE_ALL is now handled by the dedicated all-DQ capture
+        // block above (2-sink / BUFLUT-aware finder). Neutralize the old
+        // single-sink path so it does not double-handle or emit spurious skips.
+        bool dq_negedge_all = false;
         const char *dq_iologic_env = dq_negedge_all ? "EXP_HH_DQ_NEGEDGE_ALL" :
                                      is_dq12_iologic_target ? "EXP_HH_DQ12_IOLOGIC" :
                                      is_dq14_iologic_target ?
