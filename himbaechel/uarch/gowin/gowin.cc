@@ -1029,23 +1029,26 @@ void GowinImpl::constrain_exp_hh_dq_capture_clusters(void)
         // LUTFF-paired roots are real user LUTs (ABC names): locking them trips
         // HCLK-placer stale lookups and drags logic to the pad. Detach the FF
         // from such clusters and lock the FF alone (launch edge = FF.Q->pad).
-        if (root_it != ctx->cells.end() && root_name.str(ctx).rfind("$BUFLUT_", 0) != 0) {
-            CellInfo *r = root_it->second.get();
-            auto &ch = r->constr_children;
-            ch.erase(std::remove(ch.begin(), ch.end(), dff), ch.end());
-            dff->cluster = ClusterId();
-            root_it = ctx->cells.end();
-        }
+        // Keep clusters intact: GW5A slice rule requires an FF's D to come from
+        // its own slice's LUT — the pair must move together. Pin the LUT root.
         // If the FF is itself a cluster ROOT with children, release them too:
         // a locked root with constrained children can still be relocated by the
         // legalizer as a group (the 11 stragglers in W3g).
         if (!dff->constr_children.empty()) {
-            for (CellInfo *ch2 : dff->constr_children)
-                ch2->cluster = ClusterId();
-            dff->constr_children.clear();
-            dff->cluster = ClusterId();
+            log_warning("EXP_HH pin: %s is an FF-rooted cluster; skipping (cannot attr-pin DFF types).
+",
+                        dff->name.c_str(ctx));
+            dff->unsetAttr(lut_attr); dff->unsetAttr(dff_attr);
+            continue;
         }
 
+        if (root_it != ctx->cells.end() && !root_it->second->type.in(id_LUT1, id_LUT2, id_LUT3, id_LUT4)) {
+            log_warning("EXP_HH pin: %s cluster root %s is %s (not a LUT); skipping.
+",
+                        dff->name.c_str(ctx), root_it->second->name.c_str(ctx), root_it->second->type.c_str(ctx));
+            dff->unsetAttr(lut_attr); dff->unsetAttr(dff_attr);
+            continue;
+        }
         if (root_it != ctx->cells.end()) {
             CellInfo *root = root_it->second.get();
             BelId lut_bel = ctx->getBelByNameStr(lut_bel_name);
@@ -1102,8 +1105,13 @@ void GowinImpl::constrain_exp_hh_dq_capture_clusters(void)
             BelId dff_bel = ctx->getBelByNameStr(dff_bel_name);
             if (dff_bel != BelId() && isValidBelForCellType(dff->type, dff_bel) && dff->bel == BelId() &&
                 ctx->checkBelAvail(dff_bel)) {
-                // attr-only (see root branch): constraint placer makes it stick.
-                dff->setAttr(id_BEL, dff_bel_name);
+                // Cluster-free FF: cannot attr-pin (strict DFF-type check) and a
+                // lone bind is discarded — leave to the placer, log it.
+                log_warning("EXP_HH pin: %s has no LUT cluster root; left to placer.
+", dff->name.c_str(ctx));
+                dff->unsetAttr(lut_attr); dff->unsetAttr(dff_attr);
+                continue;
+                (void)0; dff->setAttr(id_BEL, dff_bel_name);
                 // Slice-legality blockers: fill the slice's other DFF slots with
                 // dummy FFs sharing this FF's control set (clk/ce/lsr + D=GND),
                 // so the placer cannot drop an incompatible FF next to the lock
