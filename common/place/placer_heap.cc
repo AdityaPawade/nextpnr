@@ -851,7 +851,9 @@ class HeAPPlacer
         // Children of PRE-BOUND cluster roots get no location above: the root
         // takes the bound branch, and the child is neither pseudo, bound,
         // cluster-free nor a root — so cell_locs lookups (total_hpwl, solver)
-        // throw dict::at(). Seed such children at their root's location.
+        // throw dict::at(). Bind such children directly at root+offset (the
+        // legalizer must not see chain children as standalone place_cells —
+        // that wedges unrelated chains).
         for (auto &cell : ctx->cells) {
             CellInfo *ci = cell.second.get();
             if (ci->isPseudo() || ci->bel != BelId() || cell_locs.count(ci->name))
@@ -859,11 +861,23 @@ class HeAPPlacer
             if (ci->cluster == ClusterId())
                 continue;
             CellInfo *root = ctx->getClusterRootCell(ci->cluster);
-            if (root != ci && cell_locs.count(root->name)) {
-                cell_locs[ci->name] = cell_locs.at(root->name);
-                cell_locs[ci->name].locked = false;
-                place_cells.push_back(ci);
-            }
+            if (root == ci || root->bel == BelId())
+                continue;
+            Loc rl = ctx->getBelLocation(root->bel);
+            Loc cl;
+            cl.x = rl.x + ci->constr_x;
+            cl.y = rl.y + ci->constr_y;
+            cl.z = ci->constr_abs_z ? ci->constr_z : rl.z + ci->constr_z;
+            BelId cb = ctx->getBelByLocation(cl);
+            if (cb == BelId() || !ctx->checkBelAvail(cb))
+                log_error("Cannot place cluster child '%s': derived bel at (%d,%d,%d) from fixed root '%s' is "
+                          "unavailable.\n",
+                          ci->name.c_str(ctx), cl.x, cl.y, cl.z, root->name.c_str(ctx));
+            ctx->bindBel(cb, ci, STRENGTH_STRONG);
+            cell_locs[ci->name].x = cl.x;
+            cell_locs[ci->name].y = cl.y;
+            cell_locs[ci->name].locked = true;
+            cell_locs[ci->name].global = false;
         }
     }
 
