@@ -1087,10 +1087,10 @@ void GowinImpl::constrain_exp_hh_dq_capture_clusters(void)
                 // id_BEL attr: the generic constraint placer scans id_BEL cells and
                 // would try to bind this already-bound root again -> "already bound
                 // to itself". The LOCKED bind alone fixes the cell in place.
-                if (root->bel == BelId())
-                    ctx->bindBel(lut_bel, root, PlaceStrength::STRENGTH_LOCKED);
-                // do NOT bind the child: cluster members follow the locked root
-                // (binding the child separately is what the placer overrode).
+                // attr-only: the constraint placer's bind is what persists; raw
+                // prePlace bindBel(LOCKED) gets discarded by placer init (proven:
+                // ras FF bound X14Y1/DFF0 ended X13Y1/DFF7). Children follow root.
+                root->setAttr(id_BEL, lut_bel_name);
                 log_info("  EXP_HH_DQ_PIN_CAPTURE: locked BUFLUT root %s -> %s and capture FF %s -> %s "
                          "after HCLK placement.\n",
                          root->name.c_str(ctx), lut_bel_name.c_str(), dff->name.c_str(ctx), dff_bel_name.c_str());
@@ -1102,10 +1102,8 @@ void GowinImpl::constrain_exp_hh_dq_capture_clusters(void)
             BelId dff_bel = ctx->getBelByNameStr(dff_bel_name);
             if (dff_bel != BelId() && isValidBelForCellType(dff->type, dff_bel) && dff->bel == BelId() &&
                 ctx->checkBelAvail(dff_bel)) {
-                // bindBel(LOCKED) alone — setting id_BEL too makes the generic
-                // constraint placer re-bind the already-bound FF (same double-bind
-                // fixed in the root branch, commit 4d4ffe7f).
-                ctx->bindBel(dff_bel, dff, PlaceStrength::STRENGTH_LOCKED);
+                // attr-only (see root branch): constraint placer makes it stick.
+                dff->setAttr(id_BEL, dff_bel_name);
                 // Slice-legality blockers: fill the slice's other DFF slots with
                 // dummy FFs sharing this FF's control set (clk/ce/lsr + D=GND),
                 // so the placer cannot drop an incompatible FF next to the lock
@@ -1126,7 +1124,7 @@ void GowinImpl::constrain_exp_hh_dq_capture_clusters(void)
                             if (nn) { blk->addInput(pp); blk->connectPort(pp, nn); }
                         }
                         if (gnd) { blk->addInput(ctx->id("D")); blk->connectPort(ctx->id("D"), gnd); }
-                        ctx->bindBel(bb, blk, PlaceStrength::STRENGTH_LOCKED);
+                        blk->setAttr(id_BEL, std::string(ctx->nameOfBel(bb)));
                     }
                 }
                 log_info("  EXP_HH_DQ_PIN_CAPTURE: locked unbuffered capture FF %s -> %s after HCLK placement.\n",
