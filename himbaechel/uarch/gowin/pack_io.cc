@@ -933,6 +933,13 @@ void GowinPacker::pack_io_regs(void)
             ci.name.str(ctx).find("sdram_dq") == std::string::npos && ci.getPort(id_I) != nullptr &&
             ci.bel != BelId()) {
             do {
+                // EXP_HH_OUT_PIN_SKIP: substring of pad names to leave unpinned
+                // (e.g. a pin whose pair permanently stalls legalization).
+                const char *skip_env = std::getenv("EXP_HH_OUT_PIN_SKIP");
+                if (skip_env && skip_env[0] && ci.name.str(ctx).find(skip_env) != std::string::npos) {
+                    log_warning("EXP_HH_SDRAM_OUT_PIN: %s skipped via EXP_HH_OUT_PIN_SKIP.\n", ctx->nameOf(&ci));
+                    break;
+                }
                 NetInfo *inet = ci.ports.at(id_I).net;
                 CellInfo *off = (inet != nullptr) ? net_driven_by(ctx, inet, is_ff, id_Q) : nullptr;
                 if (off == nullptr || inet->users.entries() != 1) {
