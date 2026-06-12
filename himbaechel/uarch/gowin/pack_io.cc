@@ -940,6 +940,24 @@ void GowinPacker::pack_io_regs(void)
                     log_warning("EXP_HH_SDRAM_OUT_PIN: %s skipped via EXP_HH_OUT_PIN_SKIP.\n", ctx->nameOf(&ci));
                     break;
                 }
+                // EXP_HH_OUT_PIN_ONLY: comma list of pad-name substrings; when set,
+                // pin ONLY matching pads (minimal-pressure mode for the worst
+                // outliers; full-set pinning wedges one cluster's legalization).
+                const char *only_env = std::getenv("EXP_HH_OUT_PIN_ONLY");
+                if (only_env && only_env[0]) {
+                    std::string name = ci.name.str(ctx), tokens(only_env);
+                    bool match = false;
+                    size_t pos = 0;
+                    while (pos != std::string::npos) {
+                        size_t comma = tokens.find(',', pos);
+                        std::string tok = tokens.substr(pos, comma == std::string::npos ? comma : comma - pos);
+                        if (!tok.empty() && name.find(tok) != std::string::npos)
+                            match = true;
+                        pos = (comma == std::string::npos) ? comma : comma + 1;
+                    }
+                    if (!match)
+                        break;
+                }
                 NetInfo *inet = ci.ports.at(id_I).net;
                 CellInfo *off = (inet != nullptr) ? net_driven_by(ctx, inet, is_ff, id_Q) : nullptr;
                 if (off == nullptr || inet->users.entries() != 1) {
