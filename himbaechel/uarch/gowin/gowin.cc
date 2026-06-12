@@ -1035,17 +1035,14 @@ void GowinImpl::constrain_exp_hh_dq_capture_clusters(void)
         // a locked root with constrained children can still be relocated by the
         // legalizer as a group (the 11 stragglers in W3g).
         if (!dff->constr_children.empty()) {
-            log_warning("EXP_HH pin: %s is an FF-rooted cluster; skipping (cannot attr-pin DFF types).
-",
-                        dff->name.c_str(ctx));
+            log_warning("EXP_HH pin: %s is an FF-rooted cluster; skipping.\n", dff->name.c_str(ctx));
             dff->unsetAttr(lut_attr); dff->unsetAttr(dff_attr);
             continue;
         }
 
         if (root_it != ctx->cells.end() && !root_it->second->type.in(id_LUT1, id_LUT2, id_LUT3, id_LUT4)) {
-            log_warning("EXP_HH pin: %s cluster root %s is %s (not a LUT); skipping.
-",
-                        dff->name.c_str(ctx), root_it->second->name.c_str(ctx), root_it->second->type.c_str(ctx));
+            log_warning("EXP_HH pin: %s cluster root %s is not a LUT; skipping.\n", dff->name.c_str(ctx),
+                        root_it->second->name.c_str(ctx));
             dff->unsetAttr(lut_attr); dff->unsetAttr(dff_attr);
             continue;
         }
@@ -1107,8 +1104,7 @@ void GowinImpl::constrain_exp_hh_dq_capture_clusters(void)
                 ctx->checkBelAvail(dff_bel)) {
                 // Cluster-free FF: cannot attr-pin (strict DFF-type check) and a
                 // lone bind is discarded — leave to the placer, log it.
-                log_warning("EXP_HH pin: %s has no LUT cluster root; left to placer.
-", dff->name.c_str(ctx));
+                log_warning("EXP_HH pin: %s has no LUT cluster root; left to placer.\n", dff->name.c_str(ctx));
                 dff->unsetAttr(lut_attr); dff->unsetAttr(dff_attr);
                 continue;
                 (void)0; dff->setAttr(id_BEL, dff_bel_name);
