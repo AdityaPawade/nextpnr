@@ -1108,7 +1108,7 @@ void GowinImpl::constrain_exp_hh_dq_capture_clusters(void)
                 // dummy FFs sharing this FF's control set (clk/ce/lsr + D=GND),
                 // so the placer cannot drop an incompatible FF next to the lock
                 // (the 'Placing design failed' wall, W3c/W3f).
-                {
+                if (r57_env_enabled("EXP_HH_OUT_PIN_BLOCKERS")) {
                     Loc fl = ctx->getBelLocation(dff_bel);
                     NetInfo *gnd = ctx->nets.count(ctx->id("$PACKER_GND")) ? ctx->nets.at(ctx->id("$PACKER_GND")).get() : nullptr;
                     for (int z = 0; z < 8; ++z) {
