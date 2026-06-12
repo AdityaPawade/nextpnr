@@ -1116,6 +1116,8 @@ void GowinImpl::constrain_exp_hh_dq_capture_clusters(void)
                         BelId bb = ctx->getBelByLocation(Loc(fl.x, fl.y, z));
                         if (bb == BelId() || !ctx->checkBelAvail(bb) || !isValidBelForCellType(dff->type, bb)) continue;
                         IdString bn = ctx->idf("$EXPHH_BLK_X%dY%d_%d", fl.x, fl.y, z);
+                        if (ctx->cells.count(bn))
+                            continue; // pad pairs share the tile; blockers are idempotent
                         auto bc = gwu.create_cell(bn, dff->type);
                         CellInfo *blk = bc.get();
                         ctx->cells[bn] = std::move(bc);
