@@ -951,7 +951,17 @@ void GowinPacker::pack_io_regs(void)
                 else if (il.y >= my - 1)
                     ty = il.y - 1;
                 std::string ioname = ctx->nameOfBel(ci.bel);
-                int slot = (!ioname.empty() && ioname.back() == 'A') ? 0 : 1;
+                // One pinned LUTFF pair per tile: a hard-fixed root gives the
+                // legalizer exactly one chain position; two pairs in one slice
+                // deadlock it (122M-attempt stall). B-half pads step one tile
+                // further inward (dist 2 vs original 10-47).
+                if (!ioname.empty() && ioname.back() == 'B') {
+                    if (tx != il.x)
+                        tx += (tx > il.x) ? 1 : -1;
+                    else
+                        ty += (ty > il.y) ? 1 : -1;
+                }
+                int slot = 0;
                 std::string fbel = "X" + std::to_string(tx) + "Y" + std::to_string(ty) + "/DFF" + std::to_string(slot);
                 std::string lbel = "X" + std::to_string(tx) + "Y" + std::to_string(ty) + "/LUT" + std::to_string(slot);
                 off->setAttr(ctx->id("EXP_HH_PIN_LUT_BEL"), lbel);
