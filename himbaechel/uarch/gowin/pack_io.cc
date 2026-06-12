@@ -14,6 +14,7 @@
 #include <cinttypes>
 #include <cstdlib>
 #include <cstring>
+#include <set>
 #include <vector>
 
 NEXTPNR_NAMESPACE_BEGIN
@@ -960,6 +961,17 @@ void GowinPacker::pack_io_regs(void)
                         tx += (tx > il.x) ? 1 : -1;
                     else
                         ty += (ty > il.y) ? 1 : -1;
+                }
+                // Tile-target collision avoidance: distinct pads can map to the
+                // same adjacent tile; step further inward until unclaimed.
+                {
+                    int sx = (tx != il.x) ? ((tx > il.x) ? 1 : -1) : 0;
+                    int sy = (ty != il.y) ? ((ty > il.y) ? 1 : -1) : 0;
+                    static std::set<std::pair<int, int>> exphh_claimed_tiles;
+                    while (!exphh_claimed_tiles.insert(std::make_pair(tx, ty)).second) {
+                        tx += sx;
+                        ty += sy;
+                    }
                 }
                 int slot = 0;
                 std::string fbel = "X" + std::to_string(tx) + "Y" + std::to_string(ty) + "/DFF" + std::to_string(slot);
