@@ -848,6 +848,23 @@ class HeAPPlacer
                 }
             }
         }
+        // Children of PRE-BOUND cluster roots get no location above: the root
+        // takes the bound branch, and the child is neither pseudo, bound,
+        // cluster-free nor a root — so cell_locs lookups (total_hpwl, solver)
+        // throw dict::at(). Seed such children at their root's location.
+        for (auto &cell : ctx->cells) {
+            CellInfo *ci = cell.second.get();
+            if (ci->isPseudo() || ci->bel != BelId() || cell_locs.count(ci->name))
+                continue;
+            if (ci->cluster == ClusterId())
+                continue;
+            CellInfo *root = ctx->getClusterRootCell(ci->cluster);
+            if (root != ci && cell_locs.count(root->name)) {
+                cell_locs[ci->name] = cell_locs.at(root->name);
+                cell_locs[ci->name].locked = false;
+                place_cells.push_back(ci);
+            }
+        }
     }
 
     // Setup the cells to be solved, returns the number of rows
