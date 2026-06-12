@@ -1090,10 +1090,21 @@ void GowinImpl::constrain_exp_hh_dq_capture_clusters(void)
                 // attr-only: the constraint placer's bind is what persists; raw
                 // prePlace bindBel(LOCKED) gets discarded by placer init (proven:
                 // ras FF bound X14Y1/DFF0 ended X13Y1/DFF7). Children follow root.
+                // Multi-child clusters (an ABC LUT pairing several FFs) cannot fit
+                // the pinned chain shape -> permanent legalization stall. Pin only
+                // simple LUT+FF pairs.
+                if (root->constr_children.size() != 1) {
+                    log_warning("EXP_HH pin: %s root %s has %d children; skipping.\n", dff->name.c_str(ctx),
+                                root->name.c_str(ctx), (int)root->constr_children.size());
+                    dff->unsetAttr(lut_attr);
+                    dff->unsetAttr(dff_attr);
+                    continue;
+                }
                 root->setAttr(id_BEL, lut_bel_name);
-                log_info("  EXP_HH_DQ_PIN_CAPTURE: locked BUFLUT root %s -> %s and capture FF %s -> %s "
+                log_info("  EXP_HH_DQ_PIN_CAPTURE: locked BUFLUT root %s (children=%d) -> %s and capture FF %s -> %s "
                          "after HCLK placement.\n",
-                         root->name.c_str(ctx), lut_bel_name.c_str(), dff->name.c_str(ctx), dff_bel_name.c_str());
+                         root->name.c_str(ctx), (int)root->constr_children.size(), lut_bel_name.c_str(),
+                         dff->name.c_str(ctx), dff_bel_name.c_str());
                 ++pinned_root;
             } else {
                 ++skipped;
